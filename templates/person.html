@@ -4,7 +4,9 @@
 <div class="m-head">
   <h1>{{ p.name }}</h1>
   <p class="muted">{{ p.role or 'No role yet' }}{% if p.aliases %} · also "{{ p.aliases }}"{% endif %} ·
-    {{ prof.meetings | length }} call{{ 's' if prof.meetings | length != 1 }}</p>
+    {{ prof.meetings | length }} call{{ 's' if prof.meetings | length != 1 }} ·
+    {% if voice[0] %}<span title="Used to name their lines on group calls">voice known from {{ voice[0] }} call{{ 's' if voice[0] != 1 }} ({{ (voice[1] / 60) | round(1) }} min of speech)</span>
+    {% else %}<span title="A 1:1 call with them, or naming one of their lines on a group call, teaches it">voice not learned yet</span>{% endif %}</p>
   <div class="btn-row">
     <a class="btn ghost" href="{{ url_for('person_prep', person_id=p.id) }}">{{ 'Prep for 1:1' if p.eval_profile else 'Prep for next call' }}</a>
   </div>

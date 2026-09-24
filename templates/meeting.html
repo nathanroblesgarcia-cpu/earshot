@@ -124,9 +124,11 @@
       {% endif %}
     </div>
     {% for p in transcript %}
-    <p class="line {{ p.speaker | lower }}">
+    <p class="line {{ p.kind }}">
       {% if m.chat %}<span class="ts">{{ p.label }}</span>{% else %}<button class="ts" data-t="{{ p.start }}" title="Play from here">{{ p.start | clock }}</button>{% endif %}
-      <span class="who">{{ p.who }}</span>
+      {% if can_name and p.kind == 'them' %}<button class="who pick{{ ' by-voice' if p.voice == 'auto' }}" data-ids="{{ p.ids | join(',') }}"
+        title="{{ 'Recognised by voice. ' if p.voice == 'auto' else ('You set this. ' if p.voice == 'manual' else '') }}Click to say who said this">{{ p.who }}</button>
+      {% else %}<span class="who">{{ p.who }}</span>{% endif %}
       <span class="said">{{ p.text }}</span>
     </p>
     {% else %}
@@ -190,6 +192,24 @@ try {
   if (hint && sessionStorage.getItem('earshot-with-hint')) hint.hidden = false;
   sessionStorage.removeItem('earshot-with-hint');
 } catch (e) {}
+
+// Group calls: click a line's name to say who really said it (teaches Earshot their voice).
+const tagged = {{ on_call | map(attribute='name') | list | tojson }};
+document.querySelectorAll('.who.pick').forEach(b => b.onclick = () => {
+  const pick = document.createElement('select');
+  pick.className = 'who-pick';
+  pick.innerHTML = '<option value="">Them (not sure)</option>' +
+    tagged.map(n => `<option${b.textContent.trim() === n.split(' ')[0] ? ' selected' : ''}></option>`).join('');
+  [...pick.options].slice(1).forEach((o, i) => { o.value = tagged[i]; o.textContent = tagged[i]; });
+  b.replaceWith(pick);
+  pick.focus();
+  pick.onchange = async () => {
+    await fetch('/api/meetings/{{ m.id }}/lines', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids: b.dataset.ids.split(',').map(Number), name: pick.value || null})});
+    location.reload();
+  };
+  pick.onblur = () => { if (document.body.contains(pick)) pick.replaceWith(b); };
+});
 
 const copy = document.getElementById('copy');
 if (copy) copy.onclick = async () => {

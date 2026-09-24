@@ -77,8 +77,9 @@ def _who(people_names):
     if len(people_names) == 1:
         return (f'\n\nThe only other person on this call is {people_names[0]}: every "Them" line '
                 "is them. Use their name as owner for things they will do.")
-    return ("\n\nOther people on this call: " + ", ".join(people_names) + '. "Them" lines can be '
-            "any of them; use a name as owner only when the transcript makes it clear.")
+    return ("\n\nOther people on this call: " + ", ".join(people_names) + ". A line marked with a "
+            'first name was recognised as that person by their voice. "Them" lines can be any of '
+            "them; use a name as owner only when the line's name or the transcript makes it clear.")
 
 
 def _ollama_up(timeout=3):

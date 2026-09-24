@@ -88,6 +88,15 @@ REMIND_STALE_DAYS = 7
 RECALL_NOTES_DIR = LOCAL_DIR / "markdown"
 RECALL_REFRESH_URL = None
 
+# Voices: who said each "Them" line on a group call (voices.py). Voiceprints are learned
+# from 1:1 calls. A line gets a name only when its voice matches one tagged person by at
+# least VOICE_MATCH and beats the next best by VOICE_MARGIN; otherwise it stays "Them".
+VOICE_MODEL_REPO = "Wespeaker/wespeaker-voxceleb-resnet34-LM"  # 26 MB, CC BY 4.0
+VOICE_MODEL_FILE = "voxceleb_resnet34_LM.onnx"
+VOICE_MIN_SECONDS = 1.5  # shorter lines ("okay", "sige") are too short to tell apart
+VOICE_MATCH = 0.45  # on two real voices: 51 of 53 lines named, 0 wrong
+VOICE_MARGIN = 0.1
+
 # Summaries
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen2.5:7b"

@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS action_items (
     due         TEXT,
     done        INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS voiceprints (  -- what each person sounds like, learned per call (voices.py)
+    id         INTEGER PRIMARY KEY,
+    person_id  INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    emb        BLOB NOT NULL,                 -- 256 float32, unit length
+    seconds    REAL NOT NULL                  -- how much speech it was learned from
+);
 CREATE TABLE IF NOT EXISTS kv (          -- small bits of app state ("reminded_on")
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -126,6 +133,10 @@ def init():
             con.execute("ALTER TABLE meetings ADD COLUMN notes_source TEXT")
         if "eval_logged_at" not in have:  # when a 1:1 was last added to an eval profile
             con.execute("ALTER TABLE meetings ADD COLUMN eval_logged_at TEXT")
+        segs = {r["name"] for r in con.execute("PRAGMA table_info(segments)")}
+        if "voice" not in segs:  # "auto" = named by voice, "manual" = he said who; NULL = as heard
+            con.execute("ALTER TABLE segments ADD COLUMN voice TEXT")
+            con.execute("ALTER TABLE segments ADD COLUMN voice_score REAL")
         acts = {r["name"] for r in con.execute("PRAGMA table_info(action_items)")}
         if "due_date" not in acts:  # the due text read as a date (dues.py); NULL = not read yet
             con.execute("ALTER TABLE action_items ADD COLUMN due_date TEXT")

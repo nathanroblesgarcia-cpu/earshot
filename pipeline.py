@@ -19,6 +19,7 @@ import evals
 import notes as notes_store
 import people
 import recall_feed
+import voices
 import summarise
 from config import (AUDIO_DIR, AUDIO_RETENTION_DAYS, BLEED_CORR, BLEED_MAX_LAG, BLEED_MIN_LAG, BLEED_RUN,
                     BLEED_SIMILARITY, BLEED_WINDOW, ENVELOPE_FRAME, HALLUCINATION_REPEATS,
@@ -273,12 +274,16 @@ class Worker:
                 if self._stale(kind, meeting_id):
                     continue
                 if kind == "people":
+                    renamed = self._voices(meeting_id)  # who's tagged decides whose voices to look for
                     self._people(meeting_id)
+                    if renamed and self._notes_by_local_model(meeting_id):
+                        self.redo_summary(meeting_id)  # so the notes use the names too
                     recall_feed.write(meeting_id)
                     self._sync_eval(meeting_id)
                     continue
                 if kind in ("process", "retranscribe"):
                     self._transcribe(meeting_id, force=kind == "retranscribe")
+                    self._voices(meeting_id)
                 self._summarise(meeting_id)
                 self._people(meeting_id)
                 db.set_status(meeting_id, "done")
@@ -289,6 +294,25 @@ class Worker:
                 db.set_status(meeting_id, "error", error=f"{type(e).__name__}: {e}")
             finally:
                 self.progress = None
+
+    def _voices(self, meeting_id):
+        """Learn voices from this call and name its "Them" lines. Never fails the job: a
+        call whose voices can't be read just keeps "Them"."""
+        them = next((p[1] for p in (raw_paths(meeting_id), track_paths(meeting_id)) if p[1].exists()), None)
+        if them is None:
+            return 0
+        self.progress = {"meeting_id": meeting_id, "stage": "Recognising voices", "pct": None}
+        try:
+            return voices.update(meeting_id, them)
+        except Exception:
+            traceback.print_exc()
+            return 0
+
+    @staticmethod
+    def _notes_by_local_model(meeting_id):
+        with db.connect() as con:
+            m = con.execute("SELECT notes_source FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        return m is not None and m["notes_source"] != "claude"
 
     @staticmethod
     def _sync_eval(meeting_id):

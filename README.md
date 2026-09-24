@@ -14,6 +14,7 @@ The sample data is fictional: Sam Carter runs a small roastery and café, Ember 
 - **Transcribes offline** with faster-whisper (`small`, int8, CPU). A names list steers Whisper towards the right spelling of people and jargon. It handles English/Tagalog code-switching (Taglish).
 - **Cleans the transcript.** It drops Whisper's hallucinations (a phrase looped over silence) and *speaker bleed*: on a laptop speaker the mic hears the other person too. See [evals](#evals).
 - **Writes notes with a local LLM** (Ollama, `qwen2.5:7b`), structured as JSON: title, summary, decisions, action items with owners and due dates, and open questions. Long calls are summarised in chunks and merged.
+- **Tells voices apart on group calls.** A small speaker model (WeSpeaker ResNet34, ONNX, CPU) learns each person's voiceprint by itself from 1:1 calls, where every "Them" line is one person. On a call with several people tagged, each line gets a name only on a clear match, and anything unclear stays "Them". On two real voices it named 51 of 53 lines and got none wrong. Clicking a line's name corrects it, and that also teaches the voice.
 - **Keeps a profile per person.** Each profile collects what they're working on, what they raised, what they said they'd do, and their open action items across calls.
 - **1:1 support.** A 1:1 with a direct report is logged to their markdown development profile automatically. A **prep sheet** before the next 1:1 lists what each side owes, what they raised since the last one, their goals, and suggested topics.
 - **Action items that don't get lost.** "Friday", "tomorrow" and "Oct 1" become real dates. The actions page is grouped by overdue, today and this week, and a weekday-morning tray reminder lists what's due.
@@ -38,7 +39,7 @@ The rule never drops real speech. That's the costly mistake, because your own wo
 
 The eval also caught a bad idea. Smoothing the loudness curves looked like a way to catch the quiet cases. It lifted overlapping real speech above the threshold and started dropping it (9 of 32 lines at the widest setting), so it was rejected.
 
-**The unit suite** (`tests/qa_unit.py`, 33 tests) runs every module against a throwaway database, with Whisper and Ollama stubbed. It covers owner attribution, bleed and hallucination filters, recovery after a crash, date parsing, auto-tagging, the web routes and the MCP tools. It also proves the run left the sample profiles untouched.
+**The unit suite** (`tests/qa_unit.py`, 34 tests) runs every module against a throwaway database, with Whisper and Ollama stubbed. It covers owner attribution, bleed and hallucination filters, recovery after a crash, date parsing, auto-tagging, voice naming, the web routes and the MCP tools. It also proves the run left the sample profiles untouched.
 
 ## Run it
 
@@ -68,6 +69,7 @@ To use it from Claude Code: `claude mcp add earshot -- python C:\path\to\earshot
 | Who the call is with, from the Teams call window | `callwho.py` |
 | People and profiles; 1:1 log to markdown; prep sheet | `people.py`, `evals.py`, `prep.py` |
 | Due dates and reminders | `dues.py` |
+| Voiceprints: log-mel features in numpy, speaker model in onnxruntime, naming group-call lines | `voices.py` |
 | Web UI (Flask + Jinja), tray icon (pystray) | `web.py`, `earshot.py` |
 | MCP server | `mcp_server.py` |
 

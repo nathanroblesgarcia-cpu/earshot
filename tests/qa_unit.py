@@ -921,11 +921,101 @@ def t_dues():
     assert "due 2026-12-01" in s.earshot_actions(owner="Sam")
 
 
+def t_voices():
+    import numpy as np
+    import voices
+    import web
+    # Features look like the model's training input: 80 mel bands every 10 ms, mean removed.
+    tone = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype("float32") * 0.3
+    f = voices.fbank(tone)
+    assert f.shape == (98, 80) and abs(float(f.mean())) < 1e-3
+    assert voices.embed(tone[:8000]) is None                                   # under 1.5 s: no guess
+
+    def vec(*xs):
+        v = np.zeros(256, dtype="float32")
+        for i, x in enumerate(xs):
+            v[i] = x
+        return v / np.linalg.norm(v)
+    K, J = vec(1, 0.1), vec(0.1, 1)
+    assert voices.decide(vec(1, 0.15), {1: K, 2: J})[0] == 1
+    assert voices.decide(vec(1, 1), {1: K, 2: J})[0] is None                  # halfway: stays Them
+    assert voices.decide(vec(0, 0, 1), {1: K, 2: J})[0] is None               # nobody we know
+
+    VEC = {}
+    real_lp, real_load = voices.line_prints, voices.load
+    voices.load = lambda path: np.zeros(10, dtype="float32")
+    voices.line_prints = lambda wave, rows: [(r, VEC[r["text"]]) for r in rows
+                                             if r["end"] - r["start"] >= config.VOICE_MIN_SECONDS]
+    try:
+        def call(tagged, lines):
+            with db.connect() as con:
+                mid = new_meeting(con)
+                add_segments(con, mid, lines)
+            people.set_on_call(mid, tagged)
+            return mid
+
+        def rows(mid):
+            with db.connect() as con:
+                return {r["text"]: (r["speaker"], r["voice"]) for r in con.execute(
+                    "SELECT text, speaker, voice FROM segments WHERE meeting_id = ?", (mid,))}
+        VEC.update({"k1": vec(1, 0.05), "k2": vec(1, 0.12), "j1": vec(0.05, 1), "j2": vec(0.1, 1),
+                    "k3": vec(1, 0.1), "j3": vec(0.12, 1), "mid": vec(1, 1), "oo": vec(0, 0, 1)})
+        a = call(["Maya"], [(0, 3, "Them", "k1"), (4, 7, "Them", "k2"), (8, 9, "Me", "hi")])
+        b = call(["Leo"], [(0, 3, "Them", "j1"), (4, 7, "Them", "j2")])
+        for mid in (a, b):
+            assert voices.update(mid, "unused.ogg") == 0                      # 1:1s: learn only
+        with db.connect() as con:
+            k, j = people.lookup(con, "Maya")["id"], people.lookup(con, "Leo")["id"]
+            assert voices.learned(con, k) == (1, 6.0) and voices.learned(con, j) == (1, 6.0)
+        g = call(["Maya", "Leo"], [(0, 3, "Them", "k3"), (3.5, 4, "Them", "oo"), (4.2, 7, "Them", "k1"),
+                                      (8, 11, "Them", "j3"), (12, 15, "Them", "mid"), (16, 17, "Me", "ok")])
+        assert voices.update(g, "unused.ogg") == 4
+        got = rows(g)
+        assert got["k3"] == ("Maya Santos", "auto") and got["k1"] == ("Maya Santos", "auto")
+        assert got["oo"] == ("Maya Santos", "auto")                        # short, between two Maya lines
+        assert got["j3"] == ("Leo Reyes", "auto")
+        assert got["mid"] == ("Them", None) and got["ok"] == ("Me", None)     # unsure: never guessed
+        with db.connect() as con:
+            lines = pipeline.transcript_lines(con, g)
+        assert any(line.endswith("Maya: k3 oo k1") for line in lines), lines
+
+        # He says the unsure line was Leo: kept, and it teaches Leo's voice from this call.
+        with db.connect() as con:
+            sid = con.execute("SELECT id FROM segments WHERE meeting_id = ? AND text = 'mid'", (g,)).fetchone()[0]
+            voices.set_line(con, [sid], "Leo Reyes")
+        voices.update(g, "unused.ogg")
+        assert rows(g)["mid"] == ("Leo Reyes", "manual")
+        with db.connect() as con:
+            assert voices.learned(con, j)[0] == 2
+
+        # Down to one person tagged: the voice names go, his own label stays.
+        people.set_on_call(g, ["Maya"])
+        voices.update(g, "unused.ogg")
+        got = rows(g)
+        assert got["k3"] == ("Them", None) and got["mid"] == ("Leo Reyes", "manual")
+
+        # The page and the API.
+        people.set_on_call(g, ["Maya", "Leo"])
+        voices.update(g, "unused.ogg")
+        control_worker = web.control.worker
+        web.control.worker = pipeline.Worker()
+        c = web.app.test_client()
+        page = c.get(f"/m/{g}").data.decode()
+        assert 'class="who pick by-voice"' in page and "Recognised by voice" in page
+        assert c.post(f"/api/meetings/{g}/lines", json={"ids": [sid], "name": "Omar"}).status_code == 400
+        assert c.post(f"/api/meetings/{g}/lines", json={"ids": [sid], "name": None}).json["changed"] == 1
+        assert rows(g)["mid"] == ("Them", None)
+        assert 'class="who pick' not in c.get(f"/m/{a}").data.decode()          # 1:1: nothing to pick
+        web.control.worker = control_worker
+    finally:
+        voices.line_prints, voices.load = real_lp, real_load
+
+
 TESTS = [t_db_init, t_evals_keeps_line_endings, t_ids_never_reused, t_people_lookup_and_create, t_people_tagging_and_labels, t_people_owns,
          t_notes_save_rules, t_notes_save_people, t_commitments_to_actions, t_fix_owners, t_hallucinations, t_merge_and_lines, t_text_bleed, t_sound_bleed,
          t_opus_roundtrip, t_worker_full_flow, t_worker_ollama_down, t_worker_empty_and_missing, t_worker_recover,
          t_worker_purge, t_people_job_and_dirty_sweep, t_summarise_helpers, t_recall_feed, t_evals_auto_sync, t_ollama_stall_recovery, t_prep, t_evals, t_web, t_mcp,
-         t_detect, t_callwho, t_dues]
+         t_detect, t_callwho, t_dues, t_voices]
 
 def real_evals_fingerprint():
     """Every file in the sample profiles folder, so the run can prove it touched none."""

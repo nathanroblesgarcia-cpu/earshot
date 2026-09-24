@@ -15,6 +15,7 @@ import evals
 import people
 import prep
 import recall_feed
+import voices
 from pipeline import audio_files, fmt, track_paths
 from transcript import stamp, who
 
@@ -59,12 +60,16 @@ def paragraphs(segments, them="Them", m=None):
     `m` (the meeting) makes a Teams chat week show dates and times, not call offsets."""
     out = []
     for s in segments:
+        voice = s["voice"] if "voice" in s.keys() else None
         if out and out[-1]["speaker"] == s["speaker"] and s["start"] - out[-1]["end"] < 3:
             out[-1]["text"] += " " + s["text"]
             out[-1]["end"] = s["end"]
+            out[-1]["ids"].append(s["id"])
+            out[-1]["voice"] = out[-1]["voice"] or voice
         else:
             out.append({"speaker": s["speaker"], "start": s["start"], "end": s["end"], "text": s["text"],
-                        "who": who(s["speaker"], them), "label": stamp(m, s["start"])})
+                        "who": who(s["speaker"], them), "label": stamp(m, s["start"]), "ids": [s["id"]],
+                        "kind": "me" if s["speaker"] == "Me" else "them", "voice": voice})
     return out
 
 
@@ -103,13 +108,15 @@ def people_list():
 def person(person_id):
     with db.connect() as con:
         prof = people.profile(con, person_id)
+        voice = voices.learned(con, person_id)
     if prof is None:
         abort(404)
     p = prof["person"]
     eval_html = None
     if p["eval_profile"] and Path(p["eval_profile"]).exists():
         eval_html = evals.render_markdown(Path(p["eval_profile"]).read_text(encoding="utf-8"))
-    return render_template("person.html", prof=prof, p=p, sections=people.SECTIONS, eval_html=eval_html)
+    return render_template("person.html", prof=prof, p=p, sections=people.SECTIONS, eval_html=eval_html,
+                           voice=voice)
 
 
 @app.get("/people/<int:person_id>/prep")
@@ -170,6 +177,7 @@ def meeting(meeting_id):
         one_on_one = evals.one_on_one_with(con, meeting_id)
     return render_template(
         "meeting.html", m=m, actions=actions, on_call=on_call, suggested=suggested, everyone=everyone,
+        can_name=len(on_call) >= 2 and not m["chat"],
         one_on_one=one_on_one, eval_result=request.args.get("eval"),
         can_retranscribe=all(p.exists() for p in track_paths(meeting_id)),
         transcript=paragraphs(segments, people.them_label(on_call) if on_call else "Them", m),
@@ -185,6 +193,23 @@ def api_set_people(meeting_id):
     tagged = people.set_on_call(meeting_id, names)
     control.worker.refresh_people(meeting_id)  # no-op while the call is still being processed
     return jsonify(people=[{"id": p["id"], "name": p["name"]} for p in tagged])
+
+
+@app.post("/api/meetings/<int:meeting_id>/lines")
+def api_set_lines(meeting_id):
+    """He says who said these transcript lines: {"ids": [...], "name": "Maya Santos"} or
+    name null for "Them". Only people tagged on the call can be named."""
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip() or None
+    with db.connect() as con:
+        meeting_or_404(con, meeting_id)
+        if name and name not in {p["name"] for p in people.on_call(con, meeting_id)}:
+            return jsonify(error="Only someone tagged on this call can be picked"), 400
+        ids = [int(i) for i in body.get("ids", []) if con.execute(
+            "SELECT 1 FROM segments WHERE id = ? AND meeting_id = ?", (int(i), meeting_id)).fetchone()]
+        voices.set_line(con, ids, name)
+    control.worker.refresh_people(meeting_id)  # relearns the voice and re-checks the other lines
+    return jsonify(changed=len(ids))
 
 
 @app.post("/m/<int:meeting_id>/eval")
