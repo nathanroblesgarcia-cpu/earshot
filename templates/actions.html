@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Action items · Earshot{% endblock %}
+{% macro item(a) %}
+  <li class="{{ 'done' if a.done }}">
+    <label><input type="checkbox" data-id="{{ a.id }}" {{ 'checked' if a.done }}>
+      <span>{{ a.task }}</span></label>
+    <span class="who">{{ a.owner }} ·
+      <span class="due-edit" title="{{ a.due or 'No date was said' }}">
+        <span class="due-label">{{ nice(a.due_date) or 'no date' }}</span>
+        <input type="date" class="due-input" data-id="{{ a.id }}" value="{{ a.due_date or '' }}" aria-label="Due date">
+      </span> ·
+      <a href="{{ url_for('meeting', meeting_id=a.meeting_id) }}">{{ a.title or 'Untitled meeting' }}</a></span>
+  </li>
+{% endmacro %}
+{% block body %}
+<div class="m-head">
+  <h1>Action items</h1>
+  <div class="head-tools">
+    <a class="muted" href="{{ url_for('actions', who='' if only_mine else 'me', done='1' if show_done else '') }}">
+      {{ 'Everyone' if only_mine else 'Only mine' }}</a>
+    <a class="muted" href="{{ url_for('actions', done='' if show_done else '1', who='me' if only_mine else '') }}">
+      {{ 'Hide finished' if show_done else 'Show finished too' }}</a>
+    {% if any_open %}<button class="btn ghost" id="done-all">Tick all done</button>{% endif %}
+  </div>
+</div>
+{% for key, label, items in groups %}
+<h2 class="due-head due-{{ key }}">{{ label }} <span class="muted small">{{ items | length }}</span></h2>
+<ul class="checks card">{% for a in items %}{{ item(a) }}{% endfor %}</ul>
+{% endfor %}
+{% if finished %}
+<h2 class="due-head">Finished</h2>
+<ul class="checks card">{% for a in finished %}{{ item(a) }}{% endfor %}</ul>
+{% endif %}
+{% if not groups and not finished %}
+<p class="muted empty">Nothing open.</p>
+{% endif %}
+{% endblock %}
+{% block script %}
+<script>
+const all = document.getElementById('done-all');
+if (all) all.onclick = async () => {
+  if (!confirm('Tick every open action item as done?')) return;
+  await fetch('/api/actions/done_all', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+  location.reload();
+};
+document.querySelectorAll('.checks input[type=checkbox]').forEach(cb => cb.onchange = async () => {
+  const r = await (await fetch(`/api/actions/${cb.dataset.id}/toggle`, {method: 'POST'})).json();
+  cb.closest('li').classList.toggle('done', r.done);
+});
+// Click the date to change it; the page re-sorts so the item lands in its new group.
+document.querySelectorAll('.due-edit').forEach(box => {
+  const input = box.querySelector('.due-input');
+  box.querySelector('.due-label').onclick = () => input.showPicker ? input.showPicker() : input.focus();
+  input.onchange = async () => {
+    const r = await fetch(`/api/actions/${input.dataset.id}/due`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({date: input.value})});
+    if (r.ok) location.reload();
+  };
+});
+</script>
+{% endblock %}

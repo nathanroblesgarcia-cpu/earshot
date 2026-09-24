@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% set first = p.name.split()[0] %}
+{% block title %}Prep: {{ first }} · Earshot{% endblock %}
+{% block body %}
+<div class="m-head prep-head">
+  <h1>Prep: 1:1 with {{ p.name }}</h1>
+  <p class="muted">
+    {% if prep.last %}Last 1:1: <a href="{{ url_for('meeting', meeting_id=prep.last.id) }}">{{ prep.last.started_at | when }}</a>
+    {% else %}No 1:1 call recorded yet, so this covers the last 30 days{% endif %}
+    · <a href="{{ url_for('person', person_id=p.id) }}">{{ first }}'s profile</a>
+    · <button class="btn ghost small-btn" onclick="window.print()">Print</button>
+  </p>
+</div>
+
+<section class="card prep-topics">
+  <h2>Suggested topics</h2>
+  {% if prep.topics %}
+  <ol>{% for t in prep.topics %}<li>{{ t }}</li>{% endfor %}</ol>
+  {% else %}<p class="muted">Nothing pending. A good one to ask how they're going.</p>{% endif %}
+</section>
+
+<div class="cols prep-cols">
+  <div class="stack">
+    <section class="card">
+      <h2>{{ first }} still owes you</h2>
+      {% if prep.their_actions %}
+      <ul class="prep-list">{% for a in prep.their_actions %}
+        <li>{{ a.task }}{% if a.due %} <span class="muted small">· due {{ a.due }}</span>{% endif %}
+          <a class="small date" href="{{ url_for('meeting', meeting_id=a.meeting_id) }}">{{ a.started_at[:10] }}</a></li>
+      {% endfor %}</ul>
+      {% else %}<p class="muted small">Nothing open.</p>{% endif %}
+    </section>
+
+    <section class="card">
+      <h2>You owe {{ first }}</h2>
+      {% if prep.my_actions %}
+      <ul class="prep-list">{% for a in prep.my_actions %}
+        <li>{{ a.task }}{% if a.due %} <span class="muted small">· due {{ a.due }}</span>{% endif %}
+          <a class="small date" href="{{ url_for('meeting', meeting_id=a.meeting_id) }}">{{ a.started_at[:10] }}</a></li>
+      {% endfor %}</ul>
+      {% else %}<p class="muted small">Nothing open.</p>{% endif %}
+    </section>
+
+    {% for key, heading in (('raised', first ~ ' raised'), ('commitments', first ~ " said they'd do")) %}
+    {% if prep[key] %}
+    <section class="card">
+      <h2>{{ heading }} <span class="muted small">since the last 1:1</span></h2>
+      <ul class="prep-list">{% for n in prep[key] %}
+        <li>{{ n.text }} <a class="small date" href="{{ url_for('meeting', meeting_id=n.meeting_id) }}">{{ n.started_at[:10] }}</a></li>
+      {% endfor %}</ul>
+      {% if prep.more[key] %}<p class="muted small">and {{ prep.more[key] }} older on {{ first }}'s profile.</p>{% endif %}
+    </section>
+    {% endif %}
+    {% endfor %}
+
+    {% if prep.questions %}
+    <section class="card">
+      <h2>Still-open questions</h2>
+      <ul class="prep-list">{% for q in prep.questions %}
+        <li>{{ q.text }} <a class="small date" href="{{ url_for('meeting', meeting_id=q.meeting_id) }}">{{ q.started_at[:10] }}</a></li>
+      {% endfor %}</ul>
+    </section>
+    {% endif %}
+  </div>
+
+  <div class="stack">
+    {% for name, items in prep.goals.items() %}
+    <section class="card">
+      <h2>{{ name }} <span class="muted small">eval profile</span></h2>
+      <ul class="prep-list">{% for g in items %}<li>{{ g }}</li>{% endfor %}</ul>
+    </section>
+    {% endfor %}
+
+    <section class="card">
+      <h2>Since then <span class="muted small">calls and Teams chats</span></h2>
+      {% if prep.recent %}
+      <ul class="plain">{% for r in prep.recent %}
+        <li><a href="{{ url_for('meeting', meeting_id=r.m.id) }}">{{ r.m.title or 'Untitled meeting' }}</a>
+          <span class="muted small">{{ r.m.started_at | when }}</span>
+          {% for g in r.gist %}<span class="small">{{ g }}</span>{% endfor %}</li>
+      {% endfor %}</ul>
+      {% if prep.recent_more %}<p class="muted small">and {{ prep.recent_more }} more on {{ first }}'s profile.</p>{% endif %}
+      {% else %}<p class="muted small">Nothing yet.</p>{% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

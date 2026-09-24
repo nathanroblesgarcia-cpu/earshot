@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ p.name }} · Earshot{% endblock %}
+{% block body %}
+<div class="m-head">
+  <h1>{{ p.name }}</h1>
+  <p class="muted">{{ p.role or 'No role yet' }}{% if p.aliases %} · also "{{ p.aliases }}"{% endif %} ·
+    {{ prof.meetings | length }} call{{ 's' if prof.meetings | length != 1 }}</p>
+  <div class="btn-row">
+    <a class="btn ghost" href="{{ url_for('person_prep', person_id=p.id) }}">{{ 'Prep for 1:1' if p.eval_profile else 'Prep for next call' }}</a>
+  </div>
+</div>
+
+<div class="cols">
+  <section class="card notes">
+    {% if p.about %}
+    <h3>Your notes</h3>
+    <p class="about">{{ p.about }}</p>
+    {% endif %}
+
+    {% if prof.their_actions %}
+    <h3>{{ p.name.split()[0] }}'s open action items</h3>
+    <ul>{% for a in prof.their_actions %}
+      <li>{{ a.task }}{% if a.due %} <span class="muted small">· {{ a.due }}</span>{% endif %}
+        <a class="small" href="{{ url_for('meeting', meeting_id=a.meeting_id) }}">call</a></li>
+    {% endfor %}</ul>
+    {% endif %}
+
+    {% if prof.my_actions %}
+    <h3>Your open items from calls with {{ p.name.split()[0] }}</h3>
+    <ul>{% for a in prof.my_actions %}
+      <li>{{ a.task }}{% if a.due %} <span class="muted small">· {{ a.due }}</span>{% endif %}
+        <a class="small" href="{{ url_for('meeting', meeting_id=a.meeting_id) }}">call</a></li>
+    {% endfor %}</ul>
+    {% endif %}
+
+    {% for key, heading in sections %}{% if prof.notes[key] %}
+    <h3>{{ heading }}</h3>
+    <ul class="dated">{% for n in prof.notes[key] %}
+      <li><a class="date" href="{{ url_for('meeting', meeting_id=n.meeting_id) }}" title="{{ n.title or 'Untitled meeting' }}">{{ n.started_at[:10] }}</a> {{ n.text }}</li>
+    {% endfor %}</ul>
+    {% endif %}{% endfor %}
+
+    {% if not prof.meetings %}
+    <p class="muted">No calls tagged with {{ p.name.split()[0] }} yet. On a meeting page, add them under <strong>With</strong>.</p>
+    {% endif %}
+  </section>
+
+  <div class="stack">
+    <section class="card">
+      <h2>Calls</h2>
+      {% if prof.meetings %}
+      <ul class="plain">{% for m in prof.meetings %}
+        <li><a href="{{ url_for('meeting', meeting_id=m.id) }}">{{ m.title or 'Untitled meeting' }}</a>
+          <span class="muted small">{{ m.started_at | when }}</span></li>
+      {% endfor %}</ul>
+      {% else %}<p class="muted small">None yet.</p>{% endif %}
+    </section>
+
+    {% if eval_html %}
+    <details class="card eval">
+      <summary><h2>Eval profile</h2> <span class="muted small">{{ p.eval_profile }}</span></summary>
+      <div class="md">{{ eval_html | safe }}</div>
+    </details>
+    {% endif %}
+
+    <details class="card">
+      <summary><h2>Edit details</h2></summary>
+      <form method="post" action="{{ url_for('person_save', person_id=p.id) }}" class="edit">
+        <label>Name <input name="name" value="{{ p.name }}"></label>
+        <label>Role <input name="role" value="{{ p.role or '' }}"></label>
+        <label>Also called <input name="aliases" value="{{ p.aliases or '' }}" placeholder="Nicknames, comma-separated"></label>
+        <label>Your notes <textarea name="about" rows="4">{{ p.about or '' }}</textarea></label>
+        <label>Eval profile <input name="eval_profile" value="{{ p.eval_profile or '' }}" placeholder="sample_profiles\Name\profile.md (1:1s only)"></label>
+        <button class="btn ghost">Save</button>
+      </form>
+      <form method="post" action="{{ url_for('person_delete', person_id=p.id) }}" class="danger"
+            onsubmit='return confirm({{ ("Delete " ~ p.name ~ " and their profile notes? Calls are kept.") | tojson }})'>
+        <button class="btn ghost danger">Delete person</button>
+      </form>
+    </details>
+  </div>
+</div>
+{% endblock %}

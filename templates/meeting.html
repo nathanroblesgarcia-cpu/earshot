@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}{{ m.title or 'Meeting' }} · Earshot{% endblock %}
+{% block body %}
+<div class="m-head">
+  <form method="post" action="{{ url_for('rename', meeting_id=m.id) }}" class="rename">
+    <textarea name="title" rows="1" placeholder="Untitled meeting" aria-label="Meeting name">{{ m.title or '' }}</textarea>
+  </form>
+  <p class="muted">{{ m.started_at | when }}{% if m.duration_s %} · {{ m.duration_s | mins }}{% endif %}{% if m.source %} · {{ m.source }}{% endif %}</p>
+</div>
+
+<div class="with" id="with">
+  <span class="with-label">With</span>
+  {% for p in on_call %}
+  <span class="chip" data-name="{{ p.name }}"><a href="{{ url_for('person', person_id=p.id) }}">{{ p.name }}</a><button class="x" title="Remove {{ p.name }}" aria-label="Remove {{ p.name }}">&times;</button></span>
+  {% endfor %}
+  {% for p in suggested %}
+  <button class="chip add" data-name="{{ p.name }}" title="Mentioned in this call">+ {{ p.name }}</button>
+  {% endfor %}
+  <form id="add-person" class="add-person">
+    <input list="people-list" placeholder="{{ 'Add someone' if on_call else 'Who was on this call?' }}" aria-label="Add a person">
+    <datalist id="people-list">{% for p in everyone %}<option value="{{ p.name }}">{% endfor %}</datalist>
+    <button class="btn ghost">Add</button>
+  </form>
+</div>
+{% if m.tagged_from and on_call %}
+<p class="muted small">Tagged automatically from the Teams call window ("{{ m.tagged_from }}"). Remove a name if it's wrong.</p>
+{% endif %}
+{% if on_call and summary %}
+<p class="muted small" id="with-hint" hidden>Saved. Their profiles update in about a minute. Press <strong>Redo notes</strong> if you want the names used in the action items too.</p>
+{% endif %}
+
+{% if one_on_one %}
+<section class="card oneonone">
+  <div>
+    <strong>1:1 with {{ one_on_one.name.split()[0] }}</strong>
+    {% if m.eval_logged_at %}
+    <span class="muted small">· added to eval profile {{ m.eval_logged_at | when }}</span>
+    {% elif m.chat %}
+    <span class="muted small">· chat weeks are added to {{ one_on_one.name.split()[0] }}'s eval profile with the button</span>
+    {% else %}
+    <span class="muted small">· added to {{ one_on_one.name.split()[0] }}'s eval profile automatically once the notes are done</span>
+    {% endif %}
+    {% if eval_result == 'added' %}<p class="ok small">Added to {{ one_on_one.eval_profile }}, with the transcript saved next to it.</p>
+    {% elif eval_result == 'updated' %}<p class="ok small">Updated the same entry in {{ one_on_one.eval_profile }}.</p>
+    {% elif eval_result %}<p class="error small">{{ eval_result[7:] }}</p>{% endif %}
+  </div>
+  {% if summary %}
+  <form method="post" action="{{ url_for('add_to_eval', meeting_id=m.id) }}">
+    <button class="btn ghost">{{ 'Update eval entry' if m.eval_logged_at else 'Add to ' ~ one_on_one.name.split()[0] ~ "'s eval profile" }}</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if m.status in ('recording', 'queued', 'transcribing', 'summarising') %}
+<p class="card notice" id="working">Working on this one: <span id="stage">{{ m.status }}</span>. This page updates when it's ready.</p>
+{% elif m.status == 'error' %}
+<p class="card error">Something went wrong: {{ m.error }}</p>
+{% endif %}
+
+{% if m.audio_path %}
+<audio id="player" controls preload="metadata" src="{{ url_for('audio', meeting_id=m.id) }}"></audio>
+{% elif m.audio_purged %}
+<p class="muted small">Audio deleted after 30 days. The transcript and notes are kept.</p>
+{% endif %}
+
+<div class="cols">
+  <section class="card notes" id="notes">
+    <div class="notes-head">
+      <h2>Notes</h2>
+      <div class="notes-tools">
+        {% if summary %}<button class="btn ghost" id="copy">Copy notes</button>{% endif %}
+        {% if transcript %}
+        <form method="post" action="{{ url_for('redo', meeting_id=m.id) }}"
+              {% if m.notes_source == 'claude' %}onsubmit="return confirm('These notes were corrected by Claude. Redo them with the local model and lose the corrections?')"{% endif %}>
+          <button class="btn ghost">Redo notes</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% if m.notes_source == 'claude' %}<p class="muted small">Notes corrected by Claude.</p>{% endif %}
+    {% if m.summary_error %}<p class="error small">{{ m.summary_error }}</p>{% endif %}
+
+    {% if summary %}
+    <ul>{% for b in summary %}<li>{{ b }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if decisions %}
+    <h3>Decisions</h3>
+    <ul>{% for d in decisions %}<li>{{ d }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    {% if actions %}
+    <div class="notes-head"><h3>Action items</h3>
+      {% if actions | rejectattr('done') | list %}<div class="notes-tools"><button class="btn ghost" id="done-all">Tick all done</button></div>{% endif %}
+    </div>
+    <ul class="checks">
+      {% for a in actions %}
+      <li class="{{ 'done' if a.done }}">
+        <label><input type="checkbox" data-id="{{ a.id }}" {{ 'checked' if a.done }}>
+          <span>{{ a.task }}</span></label>
+        <span class="who">{{ a.owner }}{% if a.due %} · {{ a.due }}{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if questions %}
+    <h3>Open questions</h3>
+    <ul>{% for q in questions %}<li>{{ q }}</li>{% endfor %}</ul>
+    {% endif %}
+  </section>
+
+  <section class="card transcript">
+    <div class="notes-head">
+      <h2>Transcript</h2>
+      {% if can_retranscribe %}
+      <div class="notes-tools">
+        <form method="post" action="{{ url_for('retranscribe', meeting_id=m.id) }}"
+              onsubmit="return confirm('Transcribe this call again from its audio? The notes are rewritten too.')">
+          <button class="btn ghost" title="Use after Earshot's transcription has been improved">Redo transcript</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% for p in transcript %}
+    <p class="line {{ p.speaker | lower }}">
+      {% if m.chat %}<span class="ts">{{ p.label }}</span>{% else %}<button class="ts" data-t="{{ p.start }}" title="Play from here">{{ p.start | clock }}</button>{% endif %}
+      <span class="who">{{ p.who }}</span>
+      <span class="said">{{ p.text }}</span>
+    </p>
+    {% else %}
+    <p class="muted">No transcript yet.</p>
+    {% endfor %}
+  </section>
+</div>
+
+<form method="post" action="{{ url_for('delete', meeting_id=m.id) }}" class="danger"
+      onsubmit="return confirm('Delete this meeting, its transcript, notes and audio?')">
+  <button class="btn ghost danger">Delete meeting</button>
+</form>
+{% endblock %}
+
+{% block script %}
+<script>
+// Title: wraps like text, grows to fit, Enter saves.
+const titleBox = document.querySelector('.rename textarea');
+const fitTitle = () => { titleBox.style.height = 'auto'; titleBox.style.height = titleBox.scrollHeight + 'px'; };
+titleBox.addEventListener('input', fitTitle);
+titleBox.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); titleBox.form.submit(); } });
+fitTitle();
+window.addEventListener('resize', fitTitle);
+
+const player = document.getElementById('player');
+document.querySelectorAll('.ts').forEach(b => b.onclick = () => {
+  if (!player) return;
+  player.currentTime = +b.dataset.t;
+  player.play();
+});
+
+document.querySelectorAll('.checks input').forEach(cb => cb.onchange = async () => {
+  const r = await (await fetch(`/api/actions/${cb.dataset.id}/toggle`, {method: 'POST'})).json();
+  cb.closest('li').classList.toggle('done', r.done);
+});
+const doneAll = document.getElementById('done-all');
+if (doneAll) doneAll.onclick = async () => {
+  await fetch('/api/actions/done_all', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({meeting_id: {{ m.id }}})});
+  location.reload();
+};
+
+// Who was on the call: chips to remove, one-tap suggestions, or type a name.
+const current = () => [...document.querySelectorAll('#with .chip[data-name]:not(.add)')].map(c => c.dataset.name);
+async function savePeople(names) {
+  await fetch('/api/meetings/{{ m.id }}/people', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({names})});
+  sessionStorage.setItem('earshot-with-hint', '1');
+  location.reload();
+}
+document.querySelectorAll('#with .x').forEach(b => b.onclick = () =>
+  savePeople(current().filter(n => n !== b.closest('.chip').dataset.name)));
+document.querySelectorAll('#with .chip.add').forEach(b => b.onclick = () => savePeople([...current(), b.dataset.name]));
+document.getElementById('add-person').onsubmit = e => {
+  e.preventDefault();
+  const name = e.target.querySelector('input').value.trim();
+  if (name) savePeople([...current(), name]);
+};
+try {
+  const hint = document.getElementById('with-hint');
+  if (hint && sessionStorage.getItem('earshot-with-hint')) hint.hidden = false;
+  sessionStorage.removeItem('earshot-with-hint');
+} catch (e) {}
+
+const copy = document.getElementById('copy');
+if (copy) copy.onclick = async () => {
+  // Plain text version of the notes panel, ready to paste into a message.
+  const lines = [document.querySelector('.rename textarea').value || 'Meeting notes', ''];
+  document.querySelectorAll('#notes > ul, #notes > h3').forEach(el => {
+    if (el.tagName === 'H3') { lines.push('', el.textContent); return; }
+    el.querySelectorAll('li').forEach(li => {
+      const task = li.querySelector('span');
+      const who = li.querySelector('.who');
+      lines.push('- ' + (task ? task.textContent + (who ? ' (' + who.textContent + ')' : '') : li.textContent));
+    });
+  });
+  await navigator.clipboard.writeText(lines.join('\n').trim());
+  copy.textContent = 'Copied';
+  setTimeout(() => copy.textContent = 'Copy notes', 1500);
+};
+
+{% if m.status in ('recording', 'queued', 'transcribing', 'summarising') %}
+window.onStatus = s => {
+  const p = s.progress;
+  if (p && p.meeting_id === {{ m.id }})
+    document.getElementById('stage').textContent = p.stage + (p.pct != null ? ' ' + p.pct + '%' : '...');
+  if (!s.recording || s.meeting_id !== {{ m.id }}) {
+    if (!p && !s.queued) location.reload();
+  }
+};
+{% endif %}
+</script>
+{% endblock %}

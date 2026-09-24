@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Search · Earshot{% endblock %}
+{% block body %}
+<h1>{% if q %}Results for "{{ q }}"{% else %}Search{% endif %}</h1>
+{% for r in results %}
+<section class="card hit">
+  <a class="m-title" href="{{ url_for('meeting', meeting_id=r.m.id) }}">{{ r.m.title or 'Untitled meeting' }}</a>
+  <span class="m-meta">{{ r.m.started_at | when }}</span>
+  {% for h in r.hits %}
+  <p class="line {{ h.speaker | lower }}"><span class="ts">{{ h.start | clock }}</span>
+    <span class="who">{{ h.speaker }}</span> <span class="said">{{ h.snip | safe }}</span></p>
+  {% endfor %}
+</section>
+{% else %}
+{% if q %}<p class="muted empty">Nothing found.</p>{% endif %}
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}People · Earshot{% endblock %}
+{% block body %}
+<div class="m-head">
+  <h1>People</h1>
+  <p class="muted">Profiles build up from the calls you tag them on.</p>
+</div>
+<form method="post" action="{{ url_for('person_new') }}" class="add-person card">
+  <input name="name" placeholder="Add a person (full name)" aria-label="New person name">
+  <button class="btn ghost">Add</button>
+</form>
+<ul class="meetings">
+  {% for p in rows %}
+  <li>
+    <a href="{{ url_for('person', person_id=p.id) }}">
+      <span class="m-title">{{ p.name }}{% if p.eval_profile %} <span class="badge">1:1s</span>{% endif %}</span>
+      <span class="m-meta">{{ p.role or 'No role yet' }} · {% if p.calls %}{{ p.calls }} call{{ 's' if p.calls != 1 }}, last {{ p.last_call | when }}{% else %}no calls yet{% endif %}</span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

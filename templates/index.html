@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="recorder card" id="recorder">
+  <div class="rec-idle">
+    <input id="title" placeholder="Meeting name (optional, notes will name it)" aria-label="Meeting name">
+    <button class="btn rec" id="start">&#9679; Start recording</button>
+  </div>
+  <div class="rec-live">
+    <div class="rec-row">
+      <span class="pulse"></span>
+      <strong>Recording</strong>
+      <span class="elapsed" id="elapsed">00:00</span>
+      <button class="btn stop" id="stop">&#9632; Stop</button>
+    </div>
+    <div class="meters">
+      <label>Me <span class="meter"><span id="lvl-me"></span></span></label>
+      <label>Them <span class="meter"><span id="lvl-them"></span></span></label>
+    </div>
+    <p class="muted small" id="devices"></p>
+  </div>
+  <p class="error" id="rec-error"></p>
+  <p class="muted small" id="progress"></p>
+</section>
+
+<nav class="tabs">
+  <a href="{{ url_for('index') }}" class="{{ 'on' if show == 'calls' }}">Calls <span class="count">{{ calls }}</span></a>
+  <a href="{{ url_for('index', show='chats') }}" class="{{ 'on' if show == 'chats' }}">Teams chats <span class="count">{{ chats }}</span></a>
+</nav>
+
+{% if meetings %}
+<ul class="meetings">
+  {% for m in meetings %}
+  <li>
+    <a href="{{ url_for('meeting', meeting_id=m.id) }}">
+      <span class="m-title">{{ m.title or 'Untitled meeting' }}</span>
+      <span class="m-meta">{{ m.started_at | when }}{% if m.duration_s %} · {{ m.duration_s | mins }}{% endif %}{% if m.source %} · {{ m.source }}{% endif %}{% if m.with_names %} · with {{ m.with_names }}{% endif %}</span>
+    </a>
+    {% if m.status != 'done' %}<span class="badge {{ m.status }}">{{ m.status }}</span>{% endif %}
+    {% if m.open_actions %}<span class="badge todo">{{ m.open_actions }} to do</span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+{% if show == 'chats' %}
+<p class="muted empty">No Teams chats. Importing Teams chats isn't part of this public version.</p>
+{% else %}
+<p class="muted empty">No meetings yet. Put your headphones on, join a call, and press Start recording.</p>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block script %}
+<script>
+const box = document.getElementById('recorder');
+const err = document.getElementById('rec-error');
+let wasBusy = false;
+
+document.getElementById('start').onclick = async () => {
+  err.textContent = '';
+  const r = await fetch('/api/start', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: document.getElementById('title').value})});
+  if (!r.ok) err.textContent = 'Could not start: ' + (await r.json()).error;
+  pollNav();
+};
+document.getElementById('stop').onclick = async () => {
+  await fetch('/api/stop', {method: 'POST'});
+  location.reload();
+};
+
+const pad = n => String(n).padStart(2, '0');
+window.onStatus = s => {
+  box.classList.toggle('live', s.recording);
+  if (s.recording) {
+    const h = Math.floor(s.elapsed / 3600), m = Math.floor(s.elapsed / 60) % 60, sec = s.elapsed % 60;
+    document.getElementById('elapsed').textContent = (h ? h + ':' : '') + pad(m) + ':' + pad(sec);
+    for (const k of ['me', 'them'])
+      document.getElementById('lvl-' + k).style.width = Math.min(100, (s.levels[k] || 0) * 130) + '%';
+    document.getElementById('devices').textContent = `Me: ${s.devices.me}  ·  Them: ${s.devices.them}`;
+  }
+  const p = s.progress;
+  document.getElementById('progress').textContent = p
+    ? `${p.stage}${p.pct != null ? ' ' + p.pct + '%' : '...'}${s.queued ? ` (${s.queued} more waiting)` : ''}`
+    : '';
+  // Refresh the list once processing finishes so the new notes show up.
+  const busy = !!p || s.queued > 0;
+  if (wasBusy && !busy) location.reload();
+  wasBusy = busy;
+};
+</script>
+{% endblock %}

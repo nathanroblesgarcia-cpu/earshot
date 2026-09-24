@@ -1,0 +1,8 @@
+PyAudioWPatch>=0.2.12
+faster-whisper>=1.2
+numpy>=2.0
+soundfile>=0.13
+flask>=3.1
+pystray>=0.19
+pillow>=11
+mcp>=1.20

@@ -1,0 +1,7 @@
+local/
+sample_profiles/
+__pycache__/
+*.pyc
+*.flac
+*.ogg
+*.opus
