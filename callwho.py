@@ -13,7 +13,7 @@ from datetime import datetime
 
 import db
 import people
-from config import CALL_LOG, TEAMS_CHATS
+from config import CALL_LOG, MEETINGS, TEAMS_CHATS
 
 TEAMS_SUFFIX = "microsoft teams"
 # Parts of a title that name a Teams screen, not a person.
@@ -96,6 +96,34 @@ def people_in(con, titles):
                        for n in people.names_of(p)):
                     names.append(p["name"])
     return list(dict.fromkeys(names))  # de-duplicated, first seen first
+
+
+def meeting_name(con, windows, first_seen, since):
+    """(name, title) of a scheduled meeting's window that opened after `since`, or (None, None).
+    A meeting window's title names the meeting, not a person ("Morning Huddle Meeting")."""
+    newest = sorted(((first_seen.get(h, 0), t) for h, t in windows.items()
+                     if first_seen.get(h, 0) >= since and not is_main(t)), reverse=True)
+    for _, title in newest:
+        for piece in parts(title):
+            if not people_in(con, [piece]):
+                return piece, title
+    return None, None
+
+
+def usual_people(name):
+    """The usual people of a recurring meeting in config.MEETINGS, or []."""
+    low = (name or "").lower()
+    for m in MEETINGS:
+        if m["meeting"].lower() in low:
+            return list(m["people"])
+    return []
+
+
+def set_title(meeting_id, name):
+    """Name the call after its meeting, unless it already has a title."""
+    with db.connect() as con:
+        con.execute("UPDATE meetings SET title = ? WHERE id = ? AND (title IS NULL OR title = '')",
+                    (name, meeting_id))
 
 
 def log(event, titles):

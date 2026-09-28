@@ -1,7 +1,7 @@
 """The "Record this call?" pop-up. Runs as its own process so Tk never shares a thread
 with the tray icon. Exit code 0 = Record, 1 = Not now (or it timed out).
 
-Usage: pythonw popup.py <app name> <timeout seconds> [who the call is with] [prep sheet url]
+Usage: pythonw popup.py <app name> <timeout seconds> [who the call is with] [prep sheet url] [meeting]
 """
 import sys
 import tkinter as tk
@@ -15,6 +15,7 @@ def main():
     timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 90
     who = sys.argv[3] if len(sys.argv) > 3 else ""
     prep = sys.argv[4] if len(sys.argv) > 4 else ""
+    is_meeting = len(sys.argv) > 5 and sys.argv[5] == "meeting"  # `who` is then the meeting's name
     answer = {"code": 1}
 
     root = tk.Tk()
@@ -28,7 +29,7 @@ def main():
 
     frame = tk.Frame(root, bg=BG, padx=20, pady=16)
     frame.pack()
-    heading = f"{app} call with {who}" if who else f"{app} is using your mic"
+    heading = (f"{who} on {app}" if is_meeting else f"{app} call with {who}") if who else f"{app} is using your mic"
     tk.Label(frame, text=heading, bg=BG, fg=FG, font=("Segoe UI", 13, "bold")).pack(anchor="w")
     tk.Label(frame, text="Record this call with Earshot?", bg=BG, fg=MUTED,
              font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 12))

@@ -103,9 +103,9 @@ def t_people_lookup_and_create():
         assert people.lookup(con, "maya")["name"] == "Maya Santos"
         assert people.lookup(con, "PRI")["name"] == "Priya Nair"
         assert people.lookup(con, "nobody") is None
-        pid = people.find_or_create(con, "  Carlo   Santos ")
-        assert con.execute("SELECT name FROM people WHERE id = ?", (pid,)).fetchone()[0] == "Carlo Santos"
-        assert people.find_or_create(con, "carlo") == pid  # first name finds the same person
+        pid = people.find_or_create(con, "  Carl   Santos ")
+        assert con.execute("SELECT name FROM people WHERE id = ?", (pid,)).fetchone()[0] == "Carl Santos"
+        assert people.find_or_create(con, "carl") == pid  # first name finds the same person
 
 
 def t_people_tagging_and_labels():
@@ -845,6 +845,74 @@ def t_callwho():
     assert asked[-1] == ("Teams", []), asked
 
 
+def t_meeting_windows():
+    """Replays the 28 Sep stand-up: the meeting window opened at the join screen minutes
+    before the mic, and the only window that appeared with the call was titled just
+    "Microsoft Teams"."""
+    import callwho
+    import control
+    import detect
+    assert callwho.usual_people("Morning Huddle Meeting")[:2] == ["Jess", "Omar"]
+    assert callwho.usual_people("Weekly Ops Meeting") == []
+
+    class Rec:
+        active = False
+
+        def elapsed(self):
+            return 5
+    windows = {1: "Chat | Front of house | Microsoft Teams"}
+    callwho.teams_windows = lambda: dict(windows)
+    with db.connect() as con:
+        mid = new_meeting(con, status="recording")
+    events, asked = [], []
+    control.recorder = Rec()
+    control.status = lambda: {"meeting_id": mid}
+    control.announce = events.append
+    w = detect.CallWatcher()
+    w._ask = lambda app: asked.append((app, list(w._who), w._meeting))
+    w._tick(set())
+    windows[3] = "Morning Huddle Meeting | Microsoft Teams"
+    w._tick(set())
+    w._first_seen[3] -= 300                      # he sat on the join screen for 5 minutes
+    windows[4] = "Microsoft Teams"
+    w._tick({"Teams"})
+    assert asked == [("Teams", [], "Morning Huddle Meeting")], asked
+    control.recorder.active = True
+    w._tick({"Teams"})
+    with db.connect() as con:
+        m = con.execute("SELECT title FROM meetings WHERE id = ?", (mid,)).fetchone()
+        tagged = sorted(p["name"] for p in people.on_call(con, mid))
+    assert m["title"] == "Morning Huddle Meeting"
+    assert len(tagged) == 7 and {"Omar", "Jess", "Rosa", "Tomas Cruz", "Priya Nair",
+                                 "Leo Reyes"} <= set(tagged), tagged
+    assert any(t.startswith("Carl") for t in tagged), tagged
+    assert len(events) == 1 and "usual 7 people" in events[0], events
+    with db.connect() as con:
+        assert people.lookup(con, "Carl")["name"] != "Leo Reyes"  # Carl is not Leo Carl
+
+    # A meeting window from over 15 minutes ago is not this call's; an unlisted meeting gets a title only.
+    for age, name, want_title, want_tags in ((1200, "Old Sync Meeting", None, 0), (60, "Weekly Ops Meeting", "Weekly Ops Meeting", 0)):
+        windows.clear()
+        windows.update({1: "Chat | Front of house | Microsoft Teams"})
+        with db.connect() as con:
+            mid = new_meeting(con, status="recording")
+        control.status = lambda: {"meeting_id": mid}
+        control.recorder.active = False
+        w = detect.CallWatcher()
+        w._ask = lambda app: None
+        w._tick(set())
+        windows[5] = f"{name} | Microsoft Teams"
+        w._tick(set())
+        w._first_seen[5] -= age
+        w._tick({"Teams"})
+        control.recorder.active = True
+        w._tick({"Teams"})
+        with db.connect() as con:
+            got = con.execute("SELECT title FROM meetings WHERE id = ?", (mid,)).fetchone()["title"]
+            n = len(people.on_call(con, mid))
+        assert (got, n) == (want_title, want_tags), (name, got, n)
+
+
 def t_dues():
     import dues
     from datetime import date
@@ -1015,7 +1083,7 @@ TESTS = [t_db_init, t_evals_keeps_line_endings, t_ids_never_reused, t_people_loo
          t_notes_save_rules, t_notes_save_people, t_commitments_to_actions, t_fix_owners, t_hallucinations, t_merge_and_lines, t_text_bleed, t_sound_bleed,
          t_opus_roundtrip, t_worker_full_flow, t_worker_ollama_down, t_worker_empty_and_missing, t_worker_recover,
          t_worker_purge, t_people_job_and_dirty_sweep, t_summarise_helpers, t_recall_feed, t_evals_auto_sync, t_ollama_stall_recovery, t_prep, t_evals, t_web, t_mcp,
-         t_detect, t_callwho, t_dues, t_voices]
+         t_detect, t_callwho, t_meeting_windows, t_dues, t_voices]
 
 def real_evals_fingerprint():
     """Every file in the sample profiles folder, so the run can prove it touched none."""

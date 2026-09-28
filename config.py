@@ -76,6 +76,15 @@ PROMPT_TIMEOUT = 90  # the "Record this call?" pop-up closes itself as "Not now"
 # looking this long into a recording (the title can fill in after the call connects).
 TAG_LOOK_FOR = 120
 RING_TIME = 90  # a window that opened this long before the mic came on can still be the call's
+# Scheduled meetings: the meeting window ("Morning Huddle | Microsoft Teams") opens at the
+# join screen, often minutes before the mic, so it may be this old. Its name becomes the
+# call's title, and a meeting listed below is tagged with its usual people (remove anyone
+# who wasn't there). Matching ignores case; the name only has to contain "meeting".
+MEETING_LOBBY = 900
+MEETINGS = [
+    {"meeting": "Morning Huddle",
+     "people": ["Jess", "Omar", "Carl", "Rosa", "Tomas Cruz", "Priya Nair", "Leo Reyes"]},
+]
 CALL_LOG = LOCAL_DIR / "calls.log"  # every call-window title seen, to check new title formats
 
 # Reminders: each weekday at or after this time the tray lists his action items due today,

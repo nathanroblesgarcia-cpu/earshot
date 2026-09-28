@@ -14,7 +14,7 @@ from pathlib import Path
 import callwho
 import control
 import db
-from config import AUTO_STOP_AFTER, CALL_APPS, DETECT_EVERY, PORT, PROMPT_TIMEOUT, RING_TIME, TAG_LOOK_FOR
+from config import AUTO_STOP_AFTER, CALL_APPS, DETECT_EVERY, MEETING_LOBBY, PORT, PROMPT_TIMEOUT, RING_TIME, TAG_LOOK_FOR
 
 MIC_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
 POPUP = Path(__file__).with_name("popup.py")
@@ -74,6 +74,7 @@ class CallWatcher:
         self._who = []              # people the call window names
         self._titles = None         # the call windows' titles (None = not looked yet)
         self._tagged = False        # this recording has been tagged (or he tagged it himself)
+        self._meeting = None        # the scheduled meeting's name, when it's one
 
     def start(self):
         threading.Thread(target=self._loop, name="earshot-detect", daemon=True).start()
@@ -93,11 +94,17 @@ class CallWatcher:
         except Exception:
             return [], []
         titles = callwho.call_titles(windows, self._first_seen or {}, self._call_at - RING_TIME)
+        with db.connect() as con:
+            who = callwho.people_in(con, titles)
+            if not who:  # not a 1:1: maybe a scheduled meeting, whose window opened at the join screen
+                self._meeting, meeting_title = callwho.meeting_name(
+                    con, windows, self._first_seen or {}, self._call_at - MEETING_LOBBY)
+                if self._meeting:
+                    titles = [meeting_title]
         if titles != self._titles:
             callwho.log("call window" if titles else "no new window",
                         titles or sorted(windows.values()))
-        with db.connect() as con:
-            return titles, callwho.people_in(con, titles)
+        return titles, who
 
     def _track_windows(self):
         try:
@@ -112,7 +119,7 @@ class CallWatcher:
         recording = control.recorder.active
         self._track_windows()
         if not apps and not recording:
-            self._who, self._titles, self._call_at = [], None, None
+            self._who, self._titles, self._call_at, self._meeting = [], None, None, None
         if apps and self._call_at is None:
             self._call_at = time.time()
         if not recording:
@@ -142,8 +149,16 @@ class CallWatcher:
         if meeting_id is None:
             return
         self._call_at = self._call_at or time.time()  # recording started by hand mid-call
-        if not self._who:
+        if not self._who and not self._meeting:
             self._titles, self._who = self._call_windows()
+        if self._meeting and not self._who:
+            self._tagged = True
+            callwho.set_title(meeting_id, self._meeting)
+            usual = callwho.usual_people(self._meeting)
+            if usual and callwho.tag(meeting_id, usual, self._titles):
+                control.announce(f"Tagged {self._meeting} with its usual {len(usual)} people. "
+                                 "Remove anyone who wasn't there on the meeting page.")
+            return
         if self._who:
             self._tagged = True
             if callwho.tag(meeting_id, self._who, self._titles):
@@ -158,13 +173,14 @@ class CallWatcher:
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         exe = str(pythonw if pythonw.exists() else sys.executable)
         self._popup_app = app
-        who, prep = ", ".join(self._who), ""
+        who, prep = ", ".join(self._who) or (self._meeting or ""), ""
         if len(self._who) == 1:
             with db.connect() as con:
                 person = callwho.people.lookup(con, self._who[0])
             if person:
                 prep = f"http://127.0.0.1:{PORT}/people/{person['id']}/prep"
-        self._popup = subprocess.Popen([exe, str(POPUP), app, str(PROMPT_TIMEOUT), who, prep],
+        kind = "meeting" if self._meeting and not self._who else "person"
+        self._popup = subprocess.Popen([exe, str(POPUP), app, str(PROMPT_TIMEOUT), who, prep, kind],
                                        creationflags=subprocess.CREATE_NO_WINDOW)
         threading.Thread(target=self._await_answer, args=(self._popup, app), daemon=True).start()
 
