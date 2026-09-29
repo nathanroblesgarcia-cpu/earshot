@@ -12,31 +12,54 @@ SECTION_KEYS = [key for key, _ in people.SECTIONS]
 def save(con, meeting_id, notes, source):
     """notes: {title?, summary, decisions, action_items [{task, owner, due}], open_questions}.
     source: "local" (Ollama) or "claude". The local model only names an untitled meeting;
-    Claude's title replaces it. Ticked action items stay ticked when the task is unchanged."""
+    Claude's title replaces it. Ticked action items stay ticked when the task is the same
+    or reworded."""
     clean = lambda items: [i.strip() for i in items if i and i.strip()]  # noqa: E731
     title = (notes.get("title") or "").strip() or None
     title_sql = "COALESCE(title, ?)" if source == "local" else "COALESCE(?, title)"
     con.execute(
         f"UPDATE meetings SET title = {title_sql}, summary = ?, decisions = ?, questions = ?, "
-        "summary_error = NULL, notes_source = ? WHERE id = ?",
+        "summary_error = NULL, notes_source = ?, notes_behind = 0 WHERE id = ?",
         (title, "\n".join(f"- {b}" for b in clean(notes.get("summary", []))),
          json.dumps(clean(notes.get("decisions", [])), ensure_ascii=False),
          json.dumps(clean(notes.get("open_questions", [])), ensure_ascii=False),
          source, meeting_id))
-    done = {r["task"].strip().lower() for r in con.execute(
-        "SELECT task FROM action_items WHERE meeting_id = ? AND done = 1", (meeting_id,))}
-    # Dates he set by hand survive a rewrite of the notes, like ticks do.
-    manual = {r["task"].strip().lower(): r["due_date"] for r in con.execute(
-        "SELECT task, due_date FROM action_items WHERE meeting_id = ? AND due_manual = 1", (meeting_id,))}
+    # Ticks and dates he set by hand survive a rewrite of the notes, even when the model words
+    # the task a little differently ("Send Leo the sheet" -> "Send the sheet to Leo").
+    old = con.execute("SELECT task, done, due_date, due_manual FROM action_items WHERE meeting_id = ? "
+                      "AND (done = 1 OR due_manual = 1)", (meeting_id,)).fetchall()
     con.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
-    con.executemany(
-        "INSERT INTO action_items (meeting_id, task, owner, due, done) VALUES (?, ?, ?, ?, ?)",
-        [(meeting_id, a["task"].strip(), (a.get("owner") or "").strip() or "Unassigned",
-          (a.get("due") or "").strip(), int(a["task"].strip().lower() in done))
-         for a in notes.get("action_items", []) if (a.get("task") or "").strip()])
-    for task, due_date in manual.items():
-        con.execute("UPDATE action_items SET due_date = ?, due_manual = 1 WHERE meeting_id = ? "
-                    "AND lower(trim(task)) = ?", (due_date, meeting_id, task))
+    kept = set()
+    for a in notes.get("action_items", []):
+        task = (a.get("task") or "").strip()
+        if not task:
+            continue
+        i = _same_task(task, [(i, o) for i, o in enumerate(old) if i not in kept])
+        was = None if i is None else old[i]
+        if i is not None:
+            kept.add(i)  # one old item carries over to one new one
+        con.execute(
+            "INSERT INTO action_items (meeting_id, task, owner, due, done, due_date, due_manual) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (meeting_id, task, (a.get("owner") or "").strip() or "Unassigned", (a.get("due") or "").strip(),
+             int(bool(was and was["done"])), was["due_date"] if was and was["due_manual"] else None,
+             int(bool(was and was["due_manual"]))))
+
+
+def _same_task(task, old):
+    """Index of the old action item this task is a rewording of, or None: nearly the same
+    text, or the same key words (at least 3, and most of both). old: [(index, row)]."""
+    low, words = task.lower(), _key_words(task)
+    best, score = None, 0.0
+    for i, o in old:
+        ratio = SequenceMatcher(None, low, o["task"].strip().lower()).ratio()
+        theirs = _key_words(o["task"])
+        shared = len(words & theirs)
+        if shared >= 3 and shared >= 0.6 * max(len(words), len(theirs)):
+            ratio = max(ratio, 0.85)
+        if ratio > score:
+            best, score = i, ratio
+    return best if score >= 0.85 else None
 
 
 DUE_WORDS = re.compile(r"\b(today|tomorrow|tonight|this week|next week|monday|tuesday|wednesday|thursday|"
@@ -118,6 +141,41 @@ def fix_owners(con, meeting_id):
             con.execute("UPDATE action_items SET owner = ? WHERE id = ?", (owner, a["id"]))
             changed += 1
     return changed
+
+
+def drop_my_commitments(con, meeting_id):
+    """The profile pass sometimes puts HIS promise under someone else ("send it over" as
+    Maya's commitment in QA). Each "said they'd do" note is checked against the line it
+    came from: when that line is his own promise ("I'll send it over"), the note is dropped,
+    before it can become their action item. Only for local notes. Returns how many went."""
+    from transcript import merged
+    m = con.execute("SELECT notes_source FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+    if m is None or m["notes_source"] == "claude":
+        return 0
+    sentences = [(line["speaker"], s) for line in merged(con.execute(
+        "SELECT start, end, speaker, text FROM segments WHERE meeting_id = ? ORDER BY start", (meeting_id,)).fetchall())
+        for s in re.split(r"(?<=[.?!])\s+", line["text"]) if s.strip()]
+    def says(speaker, text):
+        """His promise = his; their promise = theirs. Their requests aren't counted: "I'm
+        asking Claude to check" reads as a request but was Maya's own task (real notes,
+        29 Sep), and these notes go into eval profiles, so only a clear promise decides."""
+        if not PROMISES.search(text) or ASKS.search(text):
+            return None
+        return "his" if speaker == "Me" else "theirs"
+
+    dropped = 0
+    for n in con.execute("SELECT id, text FROM person_notes WHERE meeting_id = ? AND section = 'commitments'",
+                         (meeting_id,)).fetchall():
+        want = _key_words(n["text"])
+        scored = [(len(want & _key_words(text)), speaker, text) for speaker, text in sentences]
+        top = max((s for s, _, _ in scored), default=0)
+        if top < 2:
+            continue  # nothing clearly said it: keep the model's note
+        verdicts = {says(sp, t) for s, sp, t in scored if s == top} - {None}
+        if verdicts == {"his"}:
+            con.execute("DELETE FROM person_notes WHERE id = ?", (n["id"],))
+            dropped += 1
+    return dropped
 
 
 def save_people(con, meeting_id, entries):

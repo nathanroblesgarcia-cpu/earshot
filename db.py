@@ -141,6 +141,10 @@ def init():
         if "due_date" not in acts:  # the due text read as a date (dues.py); NULL = not read yet
             con.execute("ALTER TABLE action_items ADD COLUMN due_date TEXT")
             con.execute("ALTER TABLE action_items ADD COLUMN due_manual INTEGER NOT NULL DEFAULT 0")
+        if "notes_behind" not in have:  # Teams messages added to a chat week after Claude checked its notes
+            con.execute("ALTER TABLE meetings ADD COLUMN notes_behind INTEGER NOT NULL DEFAULT 0")
+        if "voices_dirty" not in have:  # 1 = someone on the call has a new voiceprint; name its lines again
+            con.execute("ALTER TABLE meetings ADD COLUMN voices_dirty INTEGER NOT NULL DEFAULT 0")
         if "tagged_from" not in have:  # the Teams window title a call was auto-tagged from
             con.execute("ALTER TABLE meetings ADD COLUMN tagged_from TEXT")
         if "chat_week" not in have:  # Teams chat weeks: which chat, and the Monday the week starts

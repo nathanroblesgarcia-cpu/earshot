@@ -112,6 +112,9 @@ def earshot_meeting(meeting_id: int, transcript: bool = True, max_chars: int = 4
     if m["summary_error"]:
         out.append(f"Notes problem: {m['summary_error']}")
     out.append("Notes by: " + ("Claude (corrected)" if m["notes_source"] == "claude" else "local model"))
+    if m["notes_source"] == "claude" and m["notes_behind"]:
+        out.append(f"NOTES BEHIND: {m['notes_behind']} Teams message(s) arrived after these notes were checked. "
+                   "Read the transcript and bring the notes up to date with earshot_update_notes.")
     if m["summary"]:
         out += ["", "## Summary", m["summary"]]
     for heading, items in (("Decisions", json.loads(m["decisions"] or "[]")),
@@ -132,23 +135,73 @@ def earshot_meeting(meeting_id: int, transcript: bool = True, max_chars: int = 4
     return "\n".join(out)
 
 
+MY_NAMES = {"me", "sam", "sam", "sam carter"}
+
+
+def _said_by(con, speaker):
+    """(SQL condition on s, args, label) for the lines one person said, or None if nobody has
+    that name. Their lines are: named by voice or chat sender (Teams display names differ,
+    "Leo Reyes" for Leo Reyes, so a first name is enough), and every "Them"
+    line on a 1:1 call with only them tagged."""
+    if speaker.strip().lower() in MY_NAMES:
+        return "s.speaker = 'Me'", [], "you"
+    p = people.lookup(con, speaker)
+    if p is None:
+        return None
+    def is_them(label):
+        q = people.lookup(con, label) or people.lookup(con, label.split()[0])
+        return q is not None and q["id"] == p["id"]
+    labels = [r[0] for r in con.execute("SELECT DISTINCT speaker FROM segments WHERE speaker NOT IN ('Me', 'Them')")
+              if is_them(r[0])]
+    one_on_ones = [r[0] for r in con.execute(
+        """SELECT m.id FROM meetings m JOIN meeting_people mp ON mp.meeting_id = m.id
+           WHERE m.chat IS NULL OR m.chat_group = 0  -- a call, or their 1:1 Teams chat
+           GROUP BY m.id HAVING COUNT(*) = 1 AND MAX(mp.person_id) = ?""", (p["id"],))]
+    cond = (f"(s.speaker IN ({','.join('?' * len(labels)) or 'NULL'}) OR "
+            f"(s.speaker = 'Them' AND s.meeting_id IN ({','.join('?' * len(one_on_ones)) or 'NULL'})))")
+    return cond, [*labels, *one_on_ones], p["name"]
+
+
 @mcp.tool()
-def earshot_search(query: str, limit: int = 15) -> str:
+def earshot_search(query: str = "", limit: int = 15, speaker: str = "") -> str:
     """Full-text search across every transcript. Returns matching lines with the meeting id,
-    date, timestamp and speaker. Also matches meeting titles and summaries."""
+    date, timestamp and speaker. Also matches meeting titles and summaries.
+    speaker: only lines this person said ("Leo", "Maya", "me"), for "what did X say about Y".
+    With a speaker and no query, their most recent lines."""
     words = re.findall(r"\w+", query)
-    if not words:
+    if not words and not speaker.strip():
         return "Give some words to search for."
     fts = " ".join(f'"{w}"' for w in words)
     like = f"%{query.strip()}%"
     with db.connect() as con:
-        hits = con.execute("""
-            SELECT s.meeting_id, s.start, s.speaker, s.text, m.title, m.started_at
-            FROM segments_fts JOIN segments s ON s.id = segments_fts.rowid
-            JOIN meetings m ON m.id = s.meeting_id
-            WHERE segments_fts MATCH ? ORDER BY rank LIMIT ?""", (fts, limit)).fetchall()
-        titled = con.execute("SELECT id, title, started_at FROM meetings WHERE title LIKE ? OR summary LIKE ? "
-                             "ORDER BY started_at DESC LIMIT 10", (like, like)).fetchall()
+        cond, args, label = "1 = 1", [], ""
+        if speaker.strip():
+            said = _said_by(con, speaker)
+            if said is None:
+                return f"Earshot doesn't know anyone called '{speaker}'. earshot_people lists everyone."
+            cond, args, label = said
+        if words:
+            hits = con.execute(f"""
+                SELECT s.meeting_id, s.start, s.speaker, s.text, m.title, m.started_at, m.chat
+                FROM segments_fts JOIN segments s ON s.id = segments_fts.rowid
+                JOIN meetings m ON m.id = s.meeting_id
+                WHERE segments_fts MATCH ? AND {cond} ORDER BY rank LIMIT ?""", (fts, *args, limit)).fetchall()
+        else:
+            hits = con.execute(f"""
+                SELECT s.meeting_id, s.start, s.speaker, s.text, m.title, m.started_at, m.chat
+                FROM segments s JOIN meetings m ON m.id = s.meeting_id
+                WHERE {cond} ORDER BY m.started_at DESC, s.start DESC LIMIT ?""", (*args, limit)).fetchall()
+        titled = [] if speaker.strip() or not words else con.execute(
+            "SELECT id, title, started_at FROM meetings WHERE title LIKE ? OR summary LIKE ? "
+            "ORDER BY started_at DESC LIMIT 10", (like, like)).fetchall()
+    if speaker.strip():
+        about = f" about '{query}'" if words else ""
+        if not hits:
+            return (f"Nothing {label} said{about}. On group calls only lines Earshot recognised "
+                    "by voice carry a name; the rest are 'Them'.")
+        return "\n".join([f"What {label} said{about} (group-call lines count only when recognised by voice):",
+                          *[f"- meeting {h['meeting_id']} ({h['title'] or 'Untitled'}, {_when(h['started_at'])}) "
+                            f"[{stamp(h, h['start'])}] {h['text']}" for h in hits]])
     out = []
     if titled:
         out += ["Meetings whose title or summary match:",
@@ -156,7 +209,7 @@ def earshot_search(query: str, limit: int = 15) -> str:
     if hits:
         out += ["Transcript lines:"]
         out += [f"- meeting {h['meeting_id']} ({h['title'] or 'Untitled'}, {_when(h['started_at'])}) "
-                f"[{_fmt(h['start'])}] {h['speaker']}: {h['text']}" for h in hits]
+                f"[{stamp(h, h['start'])}] {h['speaker']}: {h['text']}" for h in hits]
     return "\n".join(out) or f"Nothing found for '{query}'."
 
 

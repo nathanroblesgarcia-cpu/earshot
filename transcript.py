@@ -1,5 +1,16 @@
 """Light transcript helpers shared by the app and the MCP (no audio libraries)."""
-from config import MERGE_GAP
+import re
+
+from config import CORRECTIONS, MERGE_GAP
+
+_FIXES = [(re.compile(p, re.IGNORECASE), r) for p, r in CORRECTIONS]
+
+
+def correct(text):
+    """A line with the words Whisper keeps mishearing put right (config.CORRECTIONS)."""
+    for pattern, right in _FIXES:
+        text = pattern.sub(right, text)
+    return text
 
 
 def fmt(seconds):

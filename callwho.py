@@ -19,7 +19,8 @@ TEAMS_SUFFIX = "microsoft teams"
 # Parts of a title that name a Teams screen, not a person.
 GENERIC = {"chat", "chats", "calendar", "activity", "teams", "calls", "call", "meeting",
            "meet", "apps", "onedrive", "files", "people", "communities", "copilot",
-           "settings", "notifications", "compact view", "meeting compact view"}
+           "settings", "notifications", "compact view", "meeting compact view",
+           "meeting join", "join", "pre-join"}  # the join screen: "Meeting join | Weekly Team Standup | ..."
 # The main window's title starts with the screen it's on ("Chat | ..."); a call window's doesn't.
 MAIN_SCREENS = {"chat", "activity", "calendar", "teams", "calls", "apps", "onedrive", "files",
                 "people", "communities", "copilot", "settings", "notifications"}

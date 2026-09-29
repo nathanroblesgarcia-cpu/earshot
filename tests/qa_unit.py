@@ -355,13 +355,20 @@ def t_worker_full_flow():
     files = sorted(p.name for p in config.AUDIO_DIR.iterdir() if p.name.startswith(f"{mid}"))
     assert files == [f"{mid}.ogg", f"{mid}_me.ogg", f"{mid}_them.ogg"], files
     assert (config.RECALL_NOTES_DIR / f"meeting-{mid}.md").exists()
-    # Redo transcript works from the kept Opus tracks
+    # Redo transcript works from the kept Opus tracks, and keeps a line he named by hand.
+    with db.connect() as con:
+        con.execute("UPDATE segments SET speaker = 'Omar', voice = 'manual' WHERE meeting_id = ? AND speaker = 'Them'",
+                    (mid,))
     w.redo_transcript(mid)
     w.jobs.get()
     run_job(w, "retranscribe", mid)
     with db.connect() as con:
         assert con.execute("SELECT status FROM meetings WHERE id = ?", (mid,)).fetchone()[0] == "done"
         assert con.execute("SELECT COUNT(*) FROM segments WHERE meeting_id = ?", (mid,)).fetchone()[0] == 2
+        kept = con.execute("SELECT speaker, voice FROM segments WHERE meeting_id = ? AND speaker != 'Me'",
+                           (mid,)).fetchone()
+    assert tuple(kept) == ("Omar", "manual"), tuple(kept)
+    assert pipeline._hand_label([{"start": 10.0, "end": 16.0, "speaker": "Ben"}], 14.0, 22.0) is None  # a quarter
     globals()["FLOW_MEETING"] = mid
 
 
@@ -450,6 +457,52 @@ def t_people_job_and_dirty_sweep():
 
 
 # ---------------------------------------------------------------- summarise helpers
+def t_notes_rewrites():
+    # A rewrite words tasks differently: ticks and hand-set dates follow the task, not the exact text.
+    with db.connect() as con:
+        mid = new_meeting(con, title="Rewrite")
+        notes.save(con, mid, {"summary": [], "decisions": [], "open_questions": [], "action_items": [
+            {"task": "Send Leo the Harbour Beans budget sheet", "owner": "Sam"},
+            {"task": "Check the cold brew refresh", "owner": "Leo"},
+            {"task": "Book the training room", "owner": "Sam"}]}, "local")
+        con.execute("UPDATE action_items SET done = 1 WHERE meeting_id = ? AND task LIKE 'Send%'", (mid,))
+        con.execute("UPDATE action_items SET due_date = '2026-10-02', due_manual = 1 WHERE meeting_id = ? "
+                    "AND task LIKE 'Check%'", (mid,))
+        notes.save(con, mid, {"summary": [], "decisions": [], "open_questions": [], "action_items": [
+            {"task": "Send the Harbour Beans budget sheet to Leo", "owner": "Sam"},
+            {"task": "Check the cold brew refresh errors", "owner": "Leo"},
+            {"task": "Send Jess the invoice list", "owner": "Sam"}]}, "local")
+        got = {r["task"]: (r["done"], r["due_date"], r["due_manual"]) for r in con.execute(
+            "SELECT * FROM action_items WHERE meeting_id = ?", (mid,))}
+    assert got["Send the Harbour Beans budget sheet to Leo"][0] == 1, got
+    assert got["Check the cold brew refresh errors"][1:] == ("2026-10-02", 1), got
+    assert got["Send Jess the invoice list"] == (0, None, 0), got                   # a new task, not the old one
+
+    # His own promise listed as someone else's commitment is dropped; theirs stays.
+    with db.connect() as con:
+        mid = new_meeting(con, title="Promises")
+        add_segments(con, mid, [(0, 3, "Them", "Can you share the menu reference file?"),
+                                (4, 7, "Me", "Sure, I'll send the menu reference file later."),
+                                (8, 11, "Them", "I will scope the roast metrics with Mark tomorrow.")])
+        con.execute("UPDATE meetings SET notes_source = 'local' WHERE id = ?", (mid,))
+    people.set_on_call(mid, ["Maya"])
+    with db.connect() as con:
+        notes.save_people(con, mid, [{"name": "Maya", "commitments": [
+            "Send the menu reference file", "Scope the roast metrics with Mark tomorrow"]}])
+        assert notes.drop_my_commitments(con, mid) == 1
+        left = [r["text"] for r in con.execute(
+            "SELECT text FROM person_notes WHERE meeting_id = ? AND section = 'commitments'", (mid,))]
+    assert left == ["Scope the roast metrics with Mark tomorrow"], left
+
+
+
+def t_corrections():
+    from transcript import correct
+    assert correct("a pour over for table two") == "a pour-over for table two"
+    assert correct("harbor beans called") == "Harbour Beans called"
+    assert correct("harbourside") == "harbourside"                                # whole words only
+
+
 def t_summarise_helpers():
     lines = [f"[00:{i:02d}] Me: " + "x" * 1000 for i in range(150)]
     parts = list(summarise._chunks(lines))
@@ -734,6 +787,19 @@ def t_mcp():
     out = s.earshot_meeting(mid)
     assert "With: Leo Reyes (1:1)" in out and "Leo: part one part two" in out, out
     assert "part two" in s.earshot_search("part two") and "Give some words" in s.earshot_search("!!!")
+    # What did X say about Y: "Them" on their 1:1, a line named by voice, a chat sender's Teams name.
+    with db.connect() as con:
+        g = new_meeting(con, title="Group", started="2026-09-25T10:00:00")
+        add_segments(con, g, [(0, 3, "Leo Reyes", "group budget line"), (4, 6, "Them", "budget unknown voice"),
+                              (7, 9, "Leo Reyes", "budget from chat"), (10, 12, "Me", "my budget line")])
+    s.earshot_set_people(g, ["Leo", "Maya"])
+    out = s.earshot_search("budget", speaker="Leo")
+    assert "group budget line" in out and "budget from chat" in out and "unknown voice" not in out, out
+    assert "my budget line" not in out and "part two" not in s.earshot_search("budget", speaker="Leo")
+    assert "part two" in s.earshot_search("", speaker="Leo")                    # the 1:1's "Them" lines
+    assert "my budget line" in s.earshot_search("budget", speaker="me")
+    assert "part two" not in s.earshot_search("part", speaker="Maya")          # not Maya's 1:1
+    assert "doesn't know anyone" in s.earshot_search("x", speaker="Nobody")
     assert "Send the sheet" in s.earshot_actions() and "No matching" in s.earshot_actions(owner="Nobody")
     aid = int(s.earshot_actions().split("(action ")[1].split(")")[0])
     assert "marked done" in s.earshot_set_action(aid, True) and "marked open" in s.earshot_set_action(aid, False)
@@ -912,6 +978,33 @@ def t_meeting_windows():
             n = len(people.on_call(con, mid))
         assert (got, n) == (want_title, want_tags), (name, got, n)
 
+    # The 28 Sep 10:30 call: the join screen is "Meeting join | Weekly Team Standup | ...",
+    # and "Meeting join" must not become the title.
+    assert callwho.parts("Meeting join | Weekly Team Standup | Microsoft Teams") == ["Weekly Team Standup"]
+    assert callwho.usual_people("Weekly Team Standup") == ["Ben", "Omar", "Noah Lim"]
+    assert callwho.usual_people("Kiosk Huddle") == ["Leo Reyes", "Priya Nair"]
+    assert callwho.usual_people("Menu Brainstorm")[-1] == "Grace"
+    windows.clear()
+    windows.update({1: "Chat | Front of house | Microsoft Teams"})
+    with db.connect() as con:
+        mid = new_meeting(con, status="recording")
+    control.status = lambda: {"meeting_id": mid}
+    control.recorder.active = False
+    w = detect.CallWatcher()
+    w._ask = lambda app: None
+    w._tick(set())
+    windows[6] = "Meeting join | Weekly Team Standup | Microsoft Teams"
+    windows[7] = "Microsoft Teams"
+    w._tick(set())
+    w._tick({"Teams"})
+    control.recorder.active = True
+    w._tick({"Teams"})
+    with db.connect() as con:
+        got = con.execute("SELECT title FROM meetings WHERE id = ?", (mid,)).fetchone()["title"]
+        tagged = sorted(p["name"] for p in people.on_call(con, mid))
+    assert got == "Weekly Team Standup", got
+    assert tagged == ["Ben", "Noah Lim", "Omar"], tagged
+
 
 def t_dues():
     import dues
@@ -998,6 +1091,11 @@ def t_voices():
     f = voices.fbank(tone)
     assert f.shape == (98, 80) and abs(float(f.mean())) < 1e-3
     assert voices.embed(tone[:8000]) is None                                   # under 1.5 s: no guess
+    # Only the talking counts: a 12 s "Okay." that is 1 s of voice is 1 s, and too short.
+    quiet = np.zeros(16000 * 11, dtype="float32")
+    assert len(voices.speech(np.concatenate([tone, quiet]))) == 16000
+    assert voices.embed(np.concatenate([tone, quiet])) is None
+    assert len(voices.speech(np.tile(tone, 40))) == 16000 * config.VOICE_MAX_SECONDS  # capped
 
     def vec(*xs):
         v = np.zeros(256, dtype="float32")
@@ -1062,6 +1160,44 @@ def t_voices():
         got = rows(g)
         assert got["k3"] == ("Them", None) and got["mid"] == ("Leo Reyes", "manual")
 
+        # Relearning a 1:1 says whose voiceprint changed; unchanged audio changes nobody.
+        changed = set()
+        voices.update(a, "unused.ogg", changed)
+        assert changed == set(), changed
+        VEC["k2"] = vec(1, 0.3)
+        voices.update(a, "unused.ogg", changed)
+        assert changed == {k}, changed
+
+        # The worker then names the group calls Maya was on again, 1:1s first.
+        people.set_on_call(g, ["Maya", "Leo"])
+        config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        pipeline.track_paths(a)[1].write_bytes(b"x")
+        with db.connect() as con:
+            con.execute("UPDATE meetings SET status = 'done', voices_dirty = 0, audio_path = 'x.ogg' "
+                        "WHERE id IN (?, ?, ?)", (a, b, g))
+        wk = pipeline.Worker()
+        VEC["k2"] = vec(1, 0.2)
+        wk._voices(a)
+        with db.connect() as con:
+            dirty = {r[0] for r in con.execute("SELECT id FROM meetings WHERE voices_dirty = 1")}
+        assert g in dirty and a not in dirty and b not in dirty, dirty          # not Leo's 1:1, not itself
+        with db.connect() as con:
+            con.execute("UPDATE meetings SET voices_dirty = 0")
+            con.execute("UPDATE meetings SET voices_dirty = 1 WHERE id IN (?, ?)", (a, g))
+            con.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('voices_version', ?)",
+                        (pipeline.VOICES_VERSION,))
+        wk._queue_dirty_people()
+        queued = [wk.jobs.get_nowait() for _ in range(wk.jobs.qsize())]
+        voice_jobs = [mid for kind, mid in queued if kind == "voices"]
+        assert voice_jobs == [a, g], queued                                     # the 1:1 teaches first
+        pipeline.track_paths(a)[1].unlink()
+
+        # A call from before the tracks were kept: learned from the mix, only where he didn't talk.
+        old = call(["Maya"], [(0, 3, "Them", "k1"), (4, 7, "Them", "j1"), (5, 6, "Me", "sabay")])
+        voices.update(old, "unused.ogg", mixed=True)
+        with db.connect() as con:
+            assert voices.learned(con, k) == (2, 9.0), voices.learned(con, k)   # j1 was talked over
+
         # The page and the API.
         people.set_on_call(g, ["Maya", "Leo"])
         voices.update(g, "unused.ogg")
@@ -1073,6 +1209,13 @@ def t_voices():
         assert c.post(f"/api/meetings/{g}/lines", json={"ids": [sid], "name": "Omar"}).status_code == 400
         assert c.post(f"/api/meetings/{g}/lines", json={"ids": [sid], "name": None}).json["changed"] == 1
         assert rows(g)["mid"] == ("Them", None)
+        # Naming a line queues the light voices job, not the people notes (minutes of Ollama).
+        jobs = [web.control.worker.jobs.get_nowait() for _ in range(web.control.worker.jobs.qsize())]
+        assert jobs == [("voices", g)], jobs
+        assert "doesn't know" not in page                                        # both voices known
+        people.set_on_call(g, ["Maya", "Leo", "Omar"])
+        assert "doesn't know Omar's voice yet" in c.get(f"/m/{g}").data.decode()
+        people.set_on_call(g, ["Maya", "Leo"])
         assert 'class="who pick' not in c.get(f"/m/{a}").data.decode()          # 1:1: nothing to pick
         web.control.worker = control_worker
     finally:
@@ -1082,7 +1225,7 @@ def t_voices():
 TESTS = [t_db_init, t_evals_keeps_line_endings, t_ids_never_reused, t_people_lookup_and_create, t_people_tagging_and_labels, t_people_owns,
          t_notes_save_rules, t_notes_save_people, t_commitments_to_actions, t_fix_owners, t_hallucinations, t_merge_and_lines, t_text_bleed, t_sound_bleed,
          t_opus_roundtrip, t_worker_full_flow, t_worker_ollama_down, t_worker_empty_and_missing, t_worker_recover,
-         t_worker_purge, t_people_job_and_dirty_sweep, t_summarise_helpers, t_recall_feed, t_evals_auto_sync, t_ollama_stall_recovery, t_prep, t_evals, t_web, t_mcp,
+         t_worker_purge, t_people_job_and_dirty_sweep, t_notes_rewrites, t_corrections, t_summarise_helpers, t_recall_feed, t_evals_auto_sync, t_ollama_stall_recovery, t_prep, t_evals, t_web, t_mcp,
          t_detect, t_callwho, t_meeting_windows, t_dues, t_voices]
 
 def real_evals_fingerprint():

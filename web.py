@@ -175,9 +175,12 @@ def meeting(meeting_id):
         suggested = people.mentioned(con, meeting_id)
         everyone = people.all_people(con)
         one_on_one = evals.one_on_one_with(con, meeting_id)
+        can_name = len(on_call) >= 2 and not m["chat"]
+        # Whose voice Earshot can't pick out yet: naming one of their lines here teaches it.
+        no_voice = [p["name"] for p in on_call if can_name and voices.learned(con, p["id"])[0] == 0]
     return render_template(
         "meeting.html", m=m, actions=actions, on_call=on_call, suggested=suggested, everyone=everyone,
-        can_name=len(on_call) >= 2 and not m["chat"],
+        can_name=can_name, no_voice=no_voice,
         one_on_one=one_on_one, eval_result=request.args.get("eval"),
         can_retranscribe=all(p.exists() for p in track_paths(meeting_id)),
         transcript=paragraphs(segments, people.them_label(on_call) if on_call else "Them", m),
@@ -208,7 +211,7 @@ def api_set_lines(meeting_id):
         ids = [int(i) for i in body.get("ids", []) if con.execute(
             "SELECT 1 FROM segments WHERE id = ? AND meeting_id = ?", (int(i), meeting_id)).fetchone()]
         voices.set_line(con, ids, name)
-    control.worker.refresh_people(meeting_id)  # relearns the voice and re-checks the other lines
+    control.worker.refresh_voices(meeting_id)  # relearns the voice and re-checks the other lines
     return jsonify(changed=len(ids))
 
 

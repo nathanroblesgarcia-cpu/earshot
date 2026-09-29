@@ -24,10 +24,11 @@ import summarise
 from config import (AUDIO_DIR, AUDIO_RETENTION_DAYS, BLEED_CORR, BLEED_MAX_LAG, BLEED_MIN_LAG, BLEED_RUN,
                     BLEED_SIMILARITY, BLEED_WINDOW, ENVELOPE_FRAME, HALLUCINATION_REPEATS,
                     THEM_ACTIVE, VOCAB, WHISPER_COMPUTE, WHISPER_MODEL)
-from transcript import fmt, merged, stamp, who  # noqa: F401  (fmt is re-exported for web and evals)
+from transcript import correct, fmt, merged, stamp, who  # noqa: F401  (fmt is re-exported for web and evals)
 
 OPUS_RATES = {8000, 12000, 16000, 24000, 48000}
 PURGE_EVERY = 6 * 3600
+VOICES_VERSION = "2"  # bump when voiceprints are made differently: every call is named again
 SILENT_RMS = 0.003  # below this a 50 ms frame of the call audio counts as silence
 
 
@@ -61,6 +62,17 @@ def _words(text):
 
 
 # -- cleaning a raw transcript -------------------------------------------------
+def _hand_label(labels, start, end):
+    """The name he gave the old line that covers most of this new one (at least half of it),
+    so Redo transcript keeps his hand labels. labels: old rows with start, end, speaker."""
+    best, most = None, 0.5 * max(end - start, 0.01)
+    for r in labels:
+        overlap = min(end, r["end"]) - max(start, r["start"])
+        if overlap >= most:
+            best, most = r["speaker"], overlap
+    return best
+
+
 def drop_hallucinations(segs):
     """Whisper invents text on silence and noise, and can get stuck repeating it
     ("ma, ma, ma" x30, "It's not available." x5 in the first real call). Drop segments
@@ -223,6 +235,17 @@ class Worker:
         if m and m["status"] in ("done", "error"):
             self.jobs.put(("people", meeting_id))
 
+    def refresh_voices(self, meeting_id):
+        """He named some lines: learn those voices and name the rest of the call's lines again,
+        without rerunning the people notes (minutes of Ollama on a long call, for every click).
+        The notes are redone only if names changed and the local model wrote them."""
+        with db.connect() as con:
+            m = con.execute("SELECT status FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+            if m and m["status"] in ("done", "error"):
+                con.execute("UPDATE meetings SET voices_dirty = 1 WHERE id = ?", (meeting_id,))
+        if m and m["status"] in ("done", "error"):
+            self.jobs.put(("voices", meeting_id))
+
     # -- internals ---------------------------------------------------------
     def _recover(self):
         with db.connect() as con:
@@ -242,6 +265,19 @@ class Worker:
                 "SELECT id FROM meetings WHERE people_dirty = 1 AND status = 'done'")]
         for meeting_id in ids:
             self.jobs.put(("people", meeting_id))
+        # Calls to name again because someone on them has a new voiceprint. 1:1s first: they
+        # teach the voices the group calls are named with.
+        with db.connect() as con:
+            have = con.execute("SELECT value FROM kv WHERE key = 'voices_version'").fetchone()
+            if not have or have["value"] != VOICES_VERSION:  # voiceprints are made a better way now
+                con.execute("UPDATE meetings SET voices_dirty = 1 WHERE chat IS NULL AND status = 'done'")
+                con.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('voices_version', ?)",
+                            (VOICES_VERSION,))
+            ids = [r["id"] for r in con.execute(
+                """SELECT m.id FROM meetings m WHERE m.voices_dirty = 1 AND m.status = 'done'
+                   ORDER BY (SELECT COUNT(*) FROM meeting_people mp WHERE mp.meeting_id = m.id) != 1, m.id""")]
+        for meeting_id in ids:
+            self.jobs.put(("voices", meeting_id))
         # Teams chat weeks saved by the MCP (a separate process) wait here as 'queued'.
         # The sweep only runs once the queue has sat empty, so nothing is queued twice.
         with db.connect() as con:
@@ -273,6 +309,14 @@ class Worker:
             try:
                 if self._stale(kind, meeting_id):
                     continue
+                if kind == "voices":
+                    renamed = self._voices(meeting_id)
+                    with db.connect() as con:  # after, so a restart mid-job leaves it to redo
+                        con.execute("UPDATE meetings SET voices_dirty = 0 WHERE id = ?", (meeting_id,))
+                    if renamed and self._notes_by_local_model(meeting_id):
+                        self._people(meeting_id)
+                        self.redo_summary(meeting_id)  # so the notes use the new names
+                    continue
                 if kind == "people":
                     renamed = self._voices(meeting_id)  # who's tagged decides whose voices to look for
                     self._people(meeting_id)
@@ -299,14 +343,25 @@ class Worker:
         """Learn voices from this call and name its "Them" lines. Never fails the job: a
         call whose voices can't be read just keeps "Them"."""
         them = next((p[1] for p in (raw_paths(meeting_id), track_paths(meeting_id)) if p[1].exists()), None)
-        if them is None:
+        mixed = AUDIO_DIR / f"{meeting_id}.ogg"
+        if them is None and not mixed.exists():
             return 0
         self.progress = {"meeting_id": meeting_id, "stage": "Recognising voices", "pct": None}
+        changed = set()
         try:
-            return voices.update(meeting_id, them)
+            renamed = voices.update(meeting_id, them or mixed, changed, mixed=them is None)
         except Exception:
             traceback.print_exc()
             return 0
+        if changed:  # a voice was learned or relearned here: name the other calls it was on again
+            marks = ",".join("?" * len(changed))
+            with db.connect() as con:
+                con.execute(f"""UPDATE meetings SET voices_dirty = 1
+                                WHERE id != ? AND chat IS NULL AND status = 'done' AND audio_path IS NOT NULL
+                                  AND (SELECT COUNT(*) FROM meeting_people mp WHERE mp.meeting_id = meetings.id) >= 2
+                                  AND id IN (SELECT meeting_id FROM meeting_people WHERE person_id IN ({marks}))""",
+                            (meeting_id, *changed))
+        return renamed
 
     @staticmethod
     def _notes_by_local_model(meeting_id):
@@ -366,12 +421,19 @@ class Worker:
         env_me, env_them = envelope(me_path), envelope(them_path)
         them = drop_hallucinations(tracks["them"])
         me = [s for s in drop_hallucinations(tracks["me"]) if not is_bleed(s, them, env_me, env_them)]
-        rows = [(meeting_id, s.start, s.end, "Me", s.text.strip()) for s in me]
-        rows += [(meeting_id, s.start, s.end, "Them", s.text.strip()) for s in them]
+        rows = [(meeting_id, s.start, s.end, "Me", correct(s.text.strip())) for s in me]
+        rows += [(meeting_id, s.start, s.end, "Them", correct(s.text.strip())) for s in them]
         with db.connect() as con:
+            # Lines he named by hand: the new lines at the same time keep his names.
+            labels = con.execute("SELECT start, end, speaker FROM segments WHERE meeting_id = ? "
+                                 "AND voice = 'manual'", (meeting_id,)).fetchall()
             con.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
-            con.executemany("INSERT INTO segments (meeting_id, start, end, speaker, text) "
-                            "VALUES (?, ?, ?, ?, ?)", rows)
+            out = []
+            for mid, start, end, speaker, text in rows:
+                name = _hand_label(labels, start, end) if speaker == "Them" else None
+                out.append((mid, start, end, name or speaker, text, "manual" if name else None))
+            con.executemany("INSERT INTO segments (meeting_id, start, end, speaker, text, voice) "
+                            "VALUES (?, ?, ?, ?, ?, ?)", out)
 
         if (me_path, them_path) == raw:
             self._save_audio(meeting_id)
@@ -426,6 +488,7 @@ class Worker:
                 return  # leave people_dirty set so the next idle sweep retries
         with db.connect() as con:
             changed = notes_store.save_people(con, meeting_id, found)
+            notes_store.drop_my_commitments(con, meeting_id)  # before they can become their actions
             notes_store.commitments_to_actions(con, meeting_id)
             notes_store.fix_owners(con, meeting_id)
         for person_id in changed:

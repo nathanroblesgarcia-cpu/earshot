@@ -15,8 +15,8 @@ import numpy as np
 import soundfile as sf
 
 import db
-from config import (VOICE_MARGIN, VOICE_MATCH, VOICE_MIN_SECONDS, VOICE_MODEL_FILE,
-                    VOICE_MODEL_REPO)
+from config import (VOICE_MARGIN, VOICE_MATCH, VOICE_MAX_SECONDS, VOICE_MIN_SECONDS,
+                    VOICE_MODEL_FILE, VOICE_MODEL_REPO, VOICE_SPEECH_RMS)
 
 RATE = 16000
 _session = None
@@ -98,8 +98,24 @@ def _model():
     return _session
 
 
+def speech(wave):
+    """Only the parts of a line where someone is talking, at most VOICE_MAX_SECONDS.
+    Whisper's line times can run long over silence ("Okay." lasting 12 s, one line 244 s on
+    the 28 Sep call with Noah), and a voiceprint of mostly silence is the sound of the Teams
+    line, not the person: every long line then matches every other."""
+    frame = RATE // 50  # 20 ms
+    n = len(wave) // frame
+    if n == 0:
+        return wave[:0]
+    frames = wave[:n * frame].reshape(n, frame)
+    rms = np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1))
+    loud = rms >= max(VOICE_SPEECH_RMS, 0.1 * np.percentile(rms, 95))
+    return frames[loud].reshape(-1)[:int(VOICE_MAX_SECONDS * RATE)]
+
+
 def embed(wave):
     """Voiceprint of a stretch of speech (unit length), or None if it's too short."""
+    wave = speech(wave)
     if len(wave) < VOICE_MIN_SECONDS * RATE:
         return None
     feats = fbank(wave)
@@ -175,14 +191,20 @@ def _learn(con, meeting_id, tagged, wave, lines):
             teach.setdefault(names[r["speaker"]], []).append(r)
         elif len(tagged) == 1 and r["speaker"] == "Them":
             teach.setdefault(tagged[0]["id"], []).append(r)
+    old = {r["person_id"]: from_blob(r["emb"]) for r in con.execute(
+        "SELECT person_id, emb FROM voiceprints WHERE meeting_id = ?", (meeting_id,))}
     con.execute("DELETE FROM voiceprints WHERE meeting_id = ?", (meeting_id,))
+    new = {}
     for pid, rows in teach.items():
         prints = line_prints(wave, rows)
         if prints:
-            secs = [r["end"] - r["start"] for r, _ in prints]
+            secs = [min(r["end"] - r["start"], VOICE_MAX_SECONDS) for r, _ in prints]
+            new[pid] = centroid([e for _, e in prints], secs)
             con.execute("INSERT INTO voiceprints (person_id, meeting_id, emb, seconds) VALUES (?, ?, ?, ?)",
-                        (pid, meeting_id, to_blob(centroid([e for _, e in prints], secs)), sum(secs)))
-    return len(teach)
+                        (pid, meeting_id, to_blob(new[pid]), sum(secs)))
+    # Whose voiceprint this call changed: their other calls are worth naming again.
+    return {pid for pid in old.keys() | new.keys()
+            if pid not in old or pid not in new or similarity(old[pid], new[pid]) < 0.999}
 
 
 def _label(con, meeting_id, tagged, wave, lines):
@@ -220,8 +242,11 @@ def _label(con, meeting_id, tagged, wave, lines):
     return sum(before[r["id"]] != got.get(r["id"], ("Them",))[0] for r in auto)
 
 
-def update(meeting_id, them_path):
-    """Learn from this call and name its voices. Returns how many lines changed name."""
+def update(meeting_id, them_path, changed=None, mixed=False):
+    """Learn from this call and name its voices. Returns how many lines changed name, and
+    adds to `changed` the people whose voiceprint this call changed.
+    mixed: the audio is the playback mix (calls from before each track was kept), so his
+    own voice is in it too; only lines he didn't talk over are used."""
     with db.connect() as con:
         m = con.execute("SELECT chat FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if m is None or m["chat"]:
@@ -229,11 +254,18 @@ def update(meeting_id, them_path):
         tagged = _tagged(con, meeting_id)
         lines = con.execute("SELECT id, start, end, speaker, voice, text FROM segments WHERE meeting_id = ? "
                             "AND speaker != 'Me' ORDER BY start", (meeting_id,)).fetchall()
+        if mixed:
+            mine = con.execute("SELECT start, end FROM segments WHERE meeting_id = ? AND speaker = 'Me'",
+                               (meeting_id,)).fetchall()
+            lines = [r for r in lines
+                     if not any(me["start"] < r["end"] and me["end"] > r["start"] for me in mine)]
     if not lines:
         return 0
     wave = load(them_path)
     with db.connect() as con:
-        _learn(con, meeting_id, tagged, wave, lines)
+        learned_now = _learn(con, meeting_id, tagged, wave, lines)
+        if changed is not None:
+            changed |= learned_now
         return _label(con, meeting_id, tagged, wave, lines)
 
 

@@ -24,6 +24,12 @@ VOCAB = ("Earshot, Ember & Oak Coffee, Sam, Maya, Leo, Priya, Omar, Jess, Rosa, 
          "Harbour Beans, Northside Kiosk, cold brew, pour-over, espresso, roast profile, green beans, "
          "oat milk, POS, loyalty app, rota, stocktake, wholesale, pastry order. "
          "Okay, so yung roast schedule natin, i-check ko muna yung stock sheet tapos i-order natin.")
+# Words Whisper still gets wrong with VOCAB, fixed in every line after transcribing:
+# (regex, replacement), case ignored. Keep them narrow so real words aren't changed.
+CORRECTIONS = [
+    (r"\bpour over\b", "pour-over"),
+    (r"\bharbor beans\b", "Harbour Beans"),
+]
 
 # Transcript cleaning (tuned on the first real call, a speaker setup).
 MERGE_GAP = 3.0              # join same-speaker lines closer than this (seconds)
@@ -84,6 +90,9 @@ MEETING_LOBBY = 900
 MEETINGS = [
     {"meeting": "Morning Huddle",
      "people": ["Jess", "Omar", "Carl", "Rosa", "Tomas Cruz", "Priya Nair", "Leo Reyes"]},
+    {"meeting": "Weekly Team Standup", "people": ["Ben", "Omar", "Noah Lim"]},  # Mondays 10:30
+    {"meeting": "Kiosk Huddle", "people": ["Leo Reyes", "Priya Nair"]},
+    {"meeting": "Menu Brainstorm", "people": ["Ben", "Omar", "Noah Lim", "Grace"]},
 ]
 CALL_LOG = LOCAL_DIR / "calls.log"  # every call-window title seen, to check new title formats
 
@@ -105,6 +114,8 @@ VOICE_MODEL_FILE = "voxceleb_resnet34_LM.onnx"
 VOICE_MIN_SECONDS = 1.5  # shorter lines ("okay", "sige") are too short to tell apart
 VOICE_MATCH = 0.45  # on two real voices: 51 of 53 lines named, 0 wrong
 VOICE_MARGIN = 0.1
+VOICE_SPEECH_RMS = 0.003  # a 20 ms frame quieter than this is silence, not voice
+VOICE_MAX_SECONDS = 30  # of speech per line: enough for a voiceprint, and keeps long lines fast
 
 # Summaries
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"

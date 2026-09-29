@@ -78,7 +78,8 @@
         {% endif %}
       </div>
     </div>
-    {% if m.notes_source == 'claude' %}<p class="muted small">Notes corrected by Claude.</p>{% endif %}
+    {% if m.notes_source == 'claude' %}<p class="muted small">Notes corrected by Claude.{% if m.notes_behind %}
+      <strong>{{ m.notes_behind }} new message{{ '' if m.notes_behind == 1 else 's' }} since then</strong>, not in these notes yet: ask Claude to update them, or Redo notes.{% endif %}</p>{% endif %}
     {% if m.summary_error %}<p class="error small">{{ m.summary_error }}</p>{% endif %}
 
     {% if summary %}
@@ -123,6 +124,9 @@
       </div>
       {% endif %}
     </div>
+    {% if no_voice %}<p class="muted small voice-hint">Earshot doesn't know {{ no_voice | join(', ') }}'s voice yet.
+      Click "Them" on a longer line of theirs (a few seconds or more) and pick their name: Earshot learns
+      the voice from it and names the rest of this call, and their future calls, by itself.</p>{% endif %}
     {% for p in transcript %}
     <p class="line {{ p.kind }}">
       {% if m.chat %}<span class="ts">{{ p.label }}</span>{% else %}<button class="ts" data-t="{{ p.start }}" title="Play from here">{{ p.start | clock }}</button>{% endif %}
