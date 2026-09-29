@@ -1217,6 +1217,13 @@ def t_voices():
         assert "doesn't know Omar's voice yet" in c.get(f"/m/{g}").data.decode()
         people.set_on_call(g, ["Maya", "Leo"])
         assert 'class="who pick' not in c.get(f"/m/{a}").data.decode()          # 1:1: nothing to pick
+        # Deleting a call that taught a voice: that person's other calls get named again.
+        with db.connect() as con:
+            con.execute("UPDATE meetings SET voices_dirty = 0, status = 'done', audio_path = 'x.ogg' WHERE id = ?", (g,))
+        assert c.post(f"/m/{old}/delete").status_code == 302                    # the mix-taught Maya call
+        with db.connect() as con:
+            assert con.execute("SELECT voices_dirty FROM meetings WHERE id = ?", (g,)).fetchone()[0] == 1
+            assert voices.learned(con, k)[0] == 1
         web.control.worker = control_worker
     finally:
         voices.line_prints, voices.load = real_lp, real_load

@@ -354,13 +354,8 @@ class Worker:
             traceback.print_exc()
             return 0
         if changed:  # a voice was learned or relearned here: name the other calls it was on again
-            marks = ",".join("?" * len(changed))
             with db.connect() as con:
-                con.execute(f"""UPDATE meetings SET voices_dirty = 1
-                                WHERE id != ? AND chat IS NULL AND status = 'done' AND audio_path IS NOT NULL
-                                  AND (SELECT COUNT(*) FROM meeting_people mp WHERE mp.meeting_id = meetings.id) >= 2
-                                  AND id IN (SELECT meeting_id FROM meeting_people WHERE person_id IN ({marks}))""",
-                            (meeting_id, *changed))
+                voices.mark_others(con, meeting_id, changed)
         return renamed
 
     @staticmethod

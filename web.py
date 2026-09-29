@@ -309,10 +309,13 @@ def delete(meeting_id):
     with db.connect() as con:
         m = meeting_or_404(con, meeting_id)
         tagged = [p["id"] for p in people.on_call(con, meeting_id)]
+        taught = {r[0] for r in con.execute("SELECT person_id FROM voiceprints WHERE meeting_id = ?", (meeting_id,))}
         for p in (*audio_files(meeting_id), Path(m["audio_path"]) if m["audio_path"] else None):
             if p:
                 p.unlink(missing_ok=True)
         con.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+        # The voices this call taught are gone with it: their other calls are named again.
+        voices.mark_others(con, meeting_id, taught)
     for person_id in tagged:  # their profiles lose this call's notes
         recall_feed.write_person(person_id, refresh=False)
     recall_feed.remove(meeting_id)
